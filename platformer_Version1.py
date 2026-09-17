@@ -1,17 +1,21 @@
 from pathlib import Path
+from array import array
 import json
 import math
 import random
 import sys
 import pygame
 
-# Shadow Parkour — расширенная версия без обязательных ассетов.
-# Все картинки и звуки необязательны: при их отсутствии используются заглушки.
+# Shadow Parkour: расширенная версия. Ассеты полностью необязательны.
 pygame.init()
+try:
+    pygame.mixer.init(frequency=44100, size=-16, channels=1)
+except pygame.error:
+    pass
 
 WIDTH, HEIGHT, FPS = 1100, 650, 60
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Shadow Parkour")
+pygame.display.set_caption("Shadow Parkour: Nightfall")
 clock = pygame.time.Clock()
 BASE_DIR = Path(__file__).resolve().parent
 TEXTURES_DIR = BASE_DIR / "textures"
@@ -20,33 +24,76 @@ SAVE_FILE = BASE_DIR / "shadow_parkour_save.json"
 TEXTURES_DIR.mkdir(exist_ok=True)
 SOUNDS_DIR.mkdir(exist_ok=True)
 
-WHITE = (245, 245, 245)
-BLACK = (10, 12, 20)
-GRAY = (150, 160, 180)
-DARK_GRAY = (35, 40, 58)
-SKY = (18, 23, 48)
-GREEN = (70, 190, 105)
-RED = (220, 65, 75)
-PURPLE = (155, 80, 200)
-GOLD = (255, 210, 70)
-BLUE = (75, 150, 240)
-ORANGE = (240, 135, 55)
-CYAN = (75, 220, 220)
-
-font_title = pygame.font.SysFont("arial", 72, bold=True)
-font_big = pygame.font.SysFont("arial", 44, bold=True)
-font_medium = pygame.font.SysFont("arial", 27, bold=True)
-font_small = pygame.font.SysFont("arial", 20)
-font_tiny = pygame.font.SysFont("arial", 16)
+WHITE, BLACK = (245, 245, 245), (8, 10, 18)
+GRAY, DARK_GRAY = (150, 160, 180), (35, 40, 58)
+SKY, GREEN = (18, 23, 48), (70, 190, 105)
+RED, PURPLE, GOLD = (220, 65, 75), (155, 80, 200), (255, 210, 70)
+BLUE, ORANGE, CYAN = (75, 150, 240), (240, 135, 55), (75, 220, 220)
+font_title = pygame.font.SysFont("arial", 70, bold=True)
+font_big = pygame.font.SysFont("arial", 43, bold=True)
+font_medium = pygame.font.SysFont("arial", 26, bold=True)
+font_small = pygame.font.SysFont("arial", 19)
+font_tiny = pygame.font.SysFont("arial", 15)
 
 DIFFICULTIES = {
-    "Легко": dict(player_speed=285, jump_power=800, enemy_speed=65,
-                  enemy_damage=8, player_health=150, enemy_health=0.85),
-    "Средне": dict(player_speed=315, jump_power=850, enemy_speed=88,
-                   enemy_damage=14, player_health=100, enemy_health=1),
-    "Сложно": dict(player_speed=345, jump_power=900, enemy_speed=112,
-                   enemy_damage=22, player_health=75, enemy_health=1.25),
+    "Легко": dict(speed=285, jump=800, enemy_speed=65, damage=8, health=150, scale=.85),
+    "Средне": dict(speed=315, jump=850, enemy_speed=88, damage=14, health=100, scale=1),
+    "Сложно": dict(speed=345, jump=900, enemy_speed=112, damage=22, health=75, scale=1.25),
 }
+
+
+class SoundManager:
+    """Загружает sounds/*.wav, а если файла нет — создаёт короткий beep-заглушку."""
+    def __init__(self):
+        self.sounds = {}
+        for name, frequency, duration in {
+            "jump": (520, .09), "dash": (180, .12), "hit": (90, .10),
+            "coin": (880, .10), "hurt": (120, .16), "boss": (55, .35),
+            "victory": (660, .35), "click": (300, .06),
+        }.items():
+            self.sounds[name] = self.load_or_beep(name, frequency, duration)
+        self.music = None
+        music_path = SOUNDS_DIR / "music.ogg"
+        try:
+            if music_path.exists():
+                pygame.mixer.music.load(str(music_path))
+                self.music = music_path
+        except (pygame.error, OSError):
+            self.music = None
+
+    def load_or_beep(self, name, frequency, duration):
+        path = SOUNDS_DIR / f"{name}.wav"
+        try:
+            if path.exists():
+                return pygame.mixer.Sound(str(path))
+            if not pygame.mixer.get_init():
+                return None
+            rate = 44100
+            samples = array("h")
+            for i in range(int(rate * duration)):
+                fade = 1 - i / (rate * duration)
+                samples.append(int(12000 * fade * math.sin(2 * math.pi * frequency * i / rate)))
+            return pygame.mixer.Sound(buffer=samples.tobytes())
+        except (pygame.error, OSError):
+            return None
+
+    def play(self, name):
+        sound = self.sounds.get(name)
+        if sound:
+            try:
+                sound.play()
+            except pygame.error:
+                pass
+
+    def start_music(self):
+        if self.music:
+            try:
+                pygame.mixer.music.play(-1)
+            except pygame.error:
+                pass
+
+
+sounds = SoundManager()
 
 
 def fallback_surface(size, color, label=""):
@@ -54,73 +101,71 @@ def fallback_surface(size, color, label=""):
     surface.fill(color)
     pygame.draw.rect(surface, BLACK, surface.get_rect(), 3)
     for x in range(-size[1], size[0], 16):
-        pygame.draw.line(surface, (255, 255, 255, 45), (x, 0),
-                         (x + size[1], size[1]), 2)
+        pygame.draw.line(surface, (255, 255, 255, 40), (x, 0), (x + size[1], size[1]), 2)
     if label:
         text = font_tiny.render(label, True, WHITE)
         surface.blit(text, text.get_rect(center=surface.get_rect().center))
     return surface
 
 
-_IMAGE_CACHE = {}
+IMAGE_CACHE = {}
 
 
 def load_sheet(filename, frame_size, color, label, frame_count=4):
+    """Поддерживает горизонтальный sprite-sheet: кадры идут слева направо."""
     key = (filename, frame_size, color, label, frame_count)
-    if key in _IMAGE_CACHE:
-        return _IMAGE_CACHE[key]
-    path = TEXTURES_DIR / filename
+    if key in IMAGE_CACHE:
+        return IMAGE_CACHE[key]
     frames = []
     try:
-        image = pygame.image.load(str(path)).convert_alpha()
+        image = pygame.image.load(str(TEXTURES_DIR / filename)).convert_alpha()
         for i in range(frame_count):
-            rect = pygame.Rect(i * frame_size[0], 0, *frame_size)
-            if rect.right <= image.get_width() and rect.bottom <= image.get_height():
-                frames.append(pygame.transform.smoothscale(
-                    image.subsurface(rect).copy(), frame_size))
+            part = pygame.Rect(i * frame_size[0], 0, frame_size[0], frame_size[1])
+            if part.right <= image.get_width() and part.bottom <= image.get_height():
+                frames.append(pygame.transform.smoothscale(image.subsurface(part).copy(), frame_size))
         if not frames:
-            raise pygame.error("empty sprite sheet")
+            raise pygame.error("sprite-sheet has no frames")
     except (pygame.error, FileNotFoundError, OSError):
-        frames = [fallback_surface(frame_size, color, f"{label} {i + 1}")
-                  for i in range(frame_count)]
-    _IMAGE_CACHE[key] = frames
+        frames = [fallback_surface(frame_size, color, f"{label} {i + 1}") for i in range(frame_count)]
+    IMAGE_CACHE[key] = frames
     return frames
 
 
-def draw_text(text, font, color, x, y, center=True, target=screen):
+def draw_text(text, font, color, x, y, center=True):
     image = font.render(str(text), True, color)
     rect = image.get_rect(center=(x, y) if center else (0, 0))
     if not center:
         rect.topleft = (x, y)
-    target.blit(image, rect)
+    screen.blit(image, rect)
 
 
 def clamp(value, low, high):
     return max(low, min(value, high))
 
 
-def save_best(value):
-    try:
-        SAVE_FILE.write_text(json.dumps({"best_score": int(value)}), encoding="utf-8")
-    except OSError:
-        pass
-
-
 def load_best():
     try:
-        return int(json.loads(SAVE_FILE.read_text(encoding="utf-8")).get("best_score", 0))
+        return int(json.loads(SAVE_FILE.read_text(encoding="utf-8")).get("best", 0))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return 0
 
 
+def save_best(value):
+    try:
+        SAVE_FILE.write_text(json.dumps({"best": int(value)}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 class Particle:
-    def __init__(self, x, y, color, life=.5, speed=100, size=4, gravity=500):
+    def __init__(self, x, y, color, life=.5, speed=140, gravity=500):
+        angle, velocity = random.random() * math.tau, random.uniform(speed * .3, speed)
         self.x, self.y = x, y
-        angle = random.uniform(0, math.tau)
-        velocity = random.uniform(speed * .35, speed)
         self.vx, self.vy = math.cos(angle) * velocity, math.sin(angle) * velocity
-        self.color, self.life, self.max_life = color, life, life
-        self.size, self.gravity = size, gravity
+        self.color = color
+        self.life = self.max_life = life
+        self.gravity = gravity
+        self.size = random.randint(2, 5)
 
     def update(self, dt):
         self.x += self.vx * dt
@@ -129,447 +174,368 @@ class Particle:
         self.life -= dt
         return self.life > 0
 
-    def draw(self, camera_x):
-        radius = max(1, int(self.size * self.life / self.max_life))
-        pygame.draw.circle(screen, self.color, (int(self.x - camera_x), int(self.y)), radius)
+    def draw(self, camera):
+        size = max(1, int(self.size * self.life / self.max_life))
+        pygame.draw.circle(screen, self.color, (int(self.x - camera), int(self.y)), size)
 
 
 class FloatingText:
     def __init__(self, text, x, y, color=WHITE):
-        self.text, self.x, self.y, self.color = text, x, y, color
-        self.life = 1.0
+        self.text, self.x, self.y, self.color, self.life = text, x, y, color, 1
 
     def update(self, dt):
-        self.y -= 32 * dt
+        self.y -= 35 * dt
         self.life -= dt
         return self.life > 0
 
-    def draw(self, camera_x):
+    def draw(self, camera):
         image = font_small.render(self.text, True, self.color)
         image.set_alpha(int(255 * clamp(self.life, 0, 1)))
-        screen.blit(image, image.get_rect(center=(self.x - camera_x, self.y)))
+        screen.blit(image, image.get_rect(center=(self.x - camera, self.y)))
 
 
 class Button:
     def __init__(self, rect, text):
         self.rect, self.text, self.hovered = pygame.Rect(rect), text, False
 
-    def update(self, pos):
-        self.hovered = self.rect.collidepoint(pos)
-
     def draw(self):
-        color = BLUE if self.hovered else DARK_GRAY
-        pygame.draw.rect(screen, color, self.rect, border_radius=12)
+        pygame.draw.rect(screen, BLUE if self.hovered else DARK_GRAY, self.rect, border_radius=12)
         pygame.draw.rect(screen, WHITE, self.rect, 2, border_radius=12)
         draw_text(self.text, font_medium, WHITE, self.rect.centerx, self.rect.centery)
+
+    def update(self, mouse):
+        self.hovered = self.rect.collidepoint(mouse)
 
 
 class Player:
     def __init__(self, game):
-        self.game, self.width, self.height = game, 58, 82
-        self.rect = pygame.Rect(150, 350, self.width, self.height)
-        self.x, self.y = float(self.rect.x), float(self.rect.y)
-        self.velocity_x = self.velocity_y = 0.0
-        self.direction, self.on_ground = 1, False
-        self.coyote_time = self.jump_buffer = 0.0
-        self.double_jump = True
-        self.health = self.max_health = 100
-        self.invulnerability = self.attack_timer = self.attack_cooldown = 0.0
-        self.dash_timer, self.dash_cooldown = 0.0, 0.0
-        self.animation_time = self.animation_frame = 0
-        self.idle = load_sheet("player_idle.png", (self.width, self.height), BLUE, "IDLE", 4)
-        self.run = load_sheet("player_run.png", (self.width, self.height), GREEN, "RUN", 6)
-        self.jump = load_sheet("player_jump.png", (self.width, self.height), ORANGE, "JUMP", 2)
-        self.attack_frames = load_sheet("player_attack.png", (self.width, self.height), RED, "ATTACK", 4)
+        self.game, self.rect = game, pygame.Rect(150, 350, 58, 82)
+        self.x, self.y = 150., 350.
+        self.vx = self.vy = 0.
+        self.direction, self.grounded, self.double_jump = 1, False, True
+        self.coyote, self.jump_buffer = 0., 0.
+        self.max_health = self.health = 100
+        self.invuln = self.attack_timer = self.attack_cd = 0.
+        self.dash_timer = self.dash_cd = 0.
+        self.anim_time = 0
+        self.idle = load_sheet("player_idle.png", (58, 82), BLUE, "IDLE", 4)
+        self.run = load_sheet("player_run.png", (58, 82), GREEN, "RUN", 6)
+        self.jump = load_sheet("player_jump.png", (58, 82), ORANGE, "JUMP", 2)
+        self.attack_frames = load_sheet("player_attack.png", (58, 82), RED, "ATTACK", 4)
 
     def reset(self, position):
         self.x, self.y = map(float, position)
         self.rect.topleft = position
-        self.velocity_x = self.velocity_y = 0
+        self.vx = self.vy = 0
         self.health = self.max_health
-        self.invulnerability = .9
-        self.double_jump = True
-        self.dash_timer = self.dash_cooldown = 0
-
-    def get_attack_rect(self):
-        x = self.rect.right if self.direction > 0 else self.rect.left - 65
-        return pygame.Rect(x, self.rect.y + 15, 65, 50)
+        self.invuln, self.double_jump, self.dash_cd = .9, True, 0
 
     def jump_action(self):
-        difficulty = DIFFICULTIES[self.game.difficulty]
-        if self.on_ground or self.coyote_time > 0:
-            self.velocity_y = -difficulty["jump_power"]
-            self.on_ground, self.coyote_time = False, 0
-            self.game.burst(self.rect.centerx, self.rect.bottom, CYAN, 8)
+        power = DIFFICULTIES[self.game.difficulty]["jump"]
+        if self.grounded or self.coyote > 0:
+            self.vy, self.grounded, self.coyote = -power, False, 0
+        elif self.double_jump:
+            self.vy, self.double_jump = -power * .82, False
+        else:
             return
-        if self.double_jump:
-            self.velocity_y = -difficulty["jump_power"] * .82
-            self.double_jump = False
-            self.game.burst(self.rect.centerx, self.rect.centery, ORANGE, 12)
+        sounds.play("jump")
+        self.game.burst(self.rect.centerx, self.rect.bottom, CYAN, 10)
 
     def attack(self):
-        if self.attack_cooldown > 0:
+        if self.attack_cd > 0:
             return
-        self.attack_timer, self.attack_cooldown = .25, .42
-        hit = self.get_attack_rect()
-        self.game.burst(hit.centerx, hit.centery, GOLD, 5, gravity=0)
-        for enemy in self.game.enemies:
-            if enemy.alive and hit.colliderect(enemy.rect):
+        self.attack_timer, self.attack_cd = .25, .42
+        hit = pygame.Rect(self.rect.right if self.direction > 0 else self.rect.left - 70, self.rect.y + 15, 70, 52)
+        self.game.burst(hit.centerx, hit.centery, GOLD, 7, gravity=0)
+        for enemy in self.game.enemies + ([self.game.boss] if self.game.boss else []):
+            if enemy and enemy.alive and hit.colliderect(enemy.rect):
                 enemy.take_damage(35)
                 self.game.score += 25
-                self.game.floating.append(FloatingText("+25", enemy.rect.centerx, enemy.rect.y, GOLD))
 
     def dash(self):
-        if self.dash_cooldown <= 0:
-            self.dash_timer, self.dash_cooldown = .14, .8
-            self.velocity_x = self.direction * 950
-            self.invulnerability = max(self.invulnerability, .2)
-            self.game.shake = max(self.game.shake, 5)
-            self.game.burst(self.rect.centerx, self.rect.centery, BLUE, 15, gravity=0)
+        if self.dash_cd <= 0:
+            self.dash_timer, self.dash_cd = .14, .8
+            self.vx, self.invuln = self.direction * 950, .2
+            sounds.play("dash")
+            self.game.shake = 6
+            self.game.burst(self.rect.centerx, self.rect.centery, BLUE, 18, gravity=0)
+
+    def take_damage(self, amount):
+        if self.invuln > 0:
+            return
+        self.health -= amount
+        self.invuln = .55
+        self.game.shake = 8
+        sounds.play("hurt")
+        if self.health <= 0:
+            self.game.respawn()
 
     def update(self, dt, keys):
         difficulty = DIFFICULTIES[self.game.difficulty]
-        self.invulnerability = max(0, self.invulnerability - dt)
-        self.attack_cooldown = max(0, self.attack_cooldown - dt)
+        self.invuln = max(0, self.invuln - dt)
+        self.attack_cd = max(0, self.attack_cd - dt)
         self.attack_timer = max(0, self.attack_timer - dt)
-        self.dash_cooldown = max(0, self.dash_cooldown - dt)
+        self.dash_cd = max(0, self.dash_cd - dt)
         self.dash_timer = max(0, self.dash_timer - dt)
-        self.coyote_time = max(0, self.coyote_time - dt)
+        self.coyote = max(0, self.coyote - dt)
         self.jump_buffer = max(0, self.jump_buffer - dt)
-
-        left = keys[pygame.K_a] or keys[pygame.K_LEFT]
-        right = keys[pygame.K_d] or keys[pygame.K_RIGHT]
+        left, right = keys[pygame.K_a] or keys[pygame.K_LEFT], keys[pygame.K_d] or keys[pygame.K_RIGHT]
         if self.dash_timer <= 0:
-            self.velocity_x = (-difficulty["player_speed"] if left else
-                               difficulty["player_speed"] if right else 0)
-        if self.velocity_x:
-            self.direction = 1 if self.velocity_x > 0 else -1
-        if self.jump_buffer > 0:
-            self.jump_action()
-            self.jump_buffer = 0
+            self.vx = -difficulty["speed"] if left else difficulty["speed"] if right else 0
+        if self.vx:
+            self.direction = 1 if self.vx > 0 else -1
+        if self.jump_buffer:
+            self.jump_action(); self.jump_buffer = 0
         if keys[pygame.K_f] or keys[pygame.K_j]:
             self.attack()
-
-        self.velocity_y += 1900 * dt
+        self.vy += 1900 * dt
         old_bottom = self.rect.bottom
-        self.x += self.velocity_x * dt
-        self.y += self.velocity_y * dt
+        self.x += self.vx * dt; self.y += self.vy * dt
         self.rect.topleft = (int(self.x), int(self.y))
-        self.on_ground = False
+        self.grounded = False
         for platform in self.game.platforms:
-            if self.rect.colliderect(platform) and self.velocity_y >= 0 and old_bottom <= platform.top + 8:
-                self.rect.bottom = platform.top
-                self.y, self.velocity_y, self.on_ground = float(self.rect.y), 0, True
-                self.double_jump = True
-                if abs(self.velocity_y) > 300:
-                    self.game.burst(self.rect.centerx, self.rect.bottom, GRAY, 5)
-        if not self.on_ground and old_bottom <= self.game.level_height:
-            self.coyote_time = .1
-        self.rect.left = max(0, self.rect.left)
-        self.x = float(self.rect.x)
-        for enemy in self.game.enemies:
-            if enemy.alive and self.rect.colliderect(enemy.rect):
+            if self.rect.colliderect(platform) and self.vy >= 0 and old_bottom <= platform.top + 10:
+                self.rect.bottom, self.y, self.vy = platform.top, float(platform.top - self.rect.height), 0
+                self.grounded, self.double_jump = True, True
+        if not self.grounded and old_bottom <= self.game.level_height:
+            self.coyote = .1
+        self.rect.left = max(0, self.rect.left); self.x = float(self.rect.x)
+        for enemy in self.game.enemies + ([self.game.boss] if self.game.boss else []):
+            if enemy and enemy.alive and self.rect.colliderect(enemy.rect):
                 self.take_damage(enemy.damage * dt)
         for hazard in self.game.hazards:
             if self.rect.colliderect(hazard):
-                self.take_damage(35 * dt)
-        if self.rect.top > self.game.level_height + 260:
-            self.game.respawn_player()
+                self.take_damage(40 * dt)
+        if self.rect.top > self.game.level_height + 250:
+            self.game.respawn()
+        frames = self.attack_frames if self.attack_timer else self.jump if not self.grounded else self.run if self.vx else self.idle
+        self.anim_time += dt * (12 if self.attack_timer else 5 if not self.grounded else 10 if self.vx else 5)
+        self.frame = int(self.anim_time) % len(frames)
 
-        frames = self.attack_frames if self.attack_timer > 0 else self.jump if not self.on_ground else self.run if self.velocity_x else self.idle
-        speed = 12 if self.attack_timer > 0 else 5 if not self.on_ground else 10 if self.velocity_x else 5
-        self.animation_time += dt * speed
-        self.animation_frame = int(self.animation_time) % len(frames)
-
-    def take_damage(self, amount):
-        if self.invulnerability > 0:
+    def draw(self, camera):
+        if self.invuln > 0 and int(self.invuln * 18) % 2 == 0:
             return
-        self.health -= amount
-        self.invulnerability = .55
-        self.game.shake = max(self.game.shake, 8)
-        if self.health <= 0:
-            self.game.respawn_player()
-
-    def draw(self, camera_x):
-        if self.invulnerability > 0 and int(self.invulnerability * 18) % 2 == 0:
-            return
-        frames = self.attack_frames if self.attack_timer > 0 else self.jump if not self.on_ground else self.run if self.velocity_x else self.idle
-        image = frames[self.animation_frame]
+        frames = self.attack_frames if self.attack_timer else self.jump if not self.grounded else self.run if self.vx else self.idle
+        image = frames[self.frame]
         if self.direction < 0:
             image = pygame.transform.flip(image, True, False)
-        screen.blit(image, (self.rect.x - camera_x, self.rect.y))
+        screen.blit(image, (self.rect.x - camera, self.rect.y))
 
 
 class Enemy:
-    def __init__(self, game, x, y, enemy_type="zombie"):
-        self.game, self.enemy_type = game, enemy_type
-        self.width, self.height = 58, 78
-        self.rect = pygame.Rect(x, y, self.width, self.height)
-        self.x, self.y = float(x), float(y)
-        scale = DIFFICULTIES[game.difficulty]["enemy_health"]
-        self.max_health = self.health = (60 if enemy_type == "zombie" else 45) * scale
-        self.damage = DIFFICULTIES[game.difficulty]["enemy_damage"] * (1.35 if enemy_type == "vampire" else 1)
-        self.alive, self.direction, self.attack_timer = True, -1, random.random()
-        color, name = (GREEN, "ZOMBIE") if enemy_type == "zombie" else (PURPLE, "VAMPIRE")
-        self.frames = load_sheet("zombie_sheet.png" if enemy_type == "zombie" else "vampire_sheet.png",
-                                 (self.width, self.height), color, name, 4)
-        self.animation_time = self.animation_frame = 0
+    def __init__(self, game, x, y, kind="zombie"):
+        self.game, self.kind = game, kind
+        self.rect = pygame.Rect(x, y, 58, 78); self.x, self.y = float(x), float(y)
+        base = 60 if kind == "zombie" else 48 if kind == "vampire" else 110
+        self.max_health = self.health = base * DIFFICULTIES[game.difficulty]["scale"]
+        self.damage = DIFFICULTIES[game.difficulty]["damage"] * (1.35 if kind == "vampire" else 1.0)
+        self.speed = DIFFICULTIES[game.difficulty]["enemy_speed"] * (1.3 if kind == "vampire" else .75 if kind == "brute" else 1)
+        self.alive, self.direction, self.anim_time = True, -1, random.random() * 4
+        colors = {"zombie": (GREEN, "ZOMBIE"), "vampire": (PURPLE, "VAMPIRE"), "brute": (ORANGE, "BRUTE")}
+        color, label = colors.get(kind, (RED, "ENEMY"))
+        self.frames = load_sheet(f"{kind}_sheet.png", (58, 78), color, label, 4)
 
     def take_damage(self, amount):
-        self.health -= amount
-        self.game.burst(self.rect.centerx, self.rect.centery, RED, 6)
+        if not self.alive: return
+        self.health -= amount; sounds.play("hit"); self.game.burst(self.rect.centerx, self.rect.centery, RED, 8)
         if self.health <= 0:
-            self.alive = False
-            self.game.score += 150
-            self.game.floating.append(FloatingText("+150", self.rect.centerx, self.rect.y, GOLD))
-            self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 20)
+            self.alive = False; self.game.score += 150; self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 22)
 
     def update(self, dt):
-        if not self.alive:
-            return
-        player = self.game.player
-        distance = player.rect.centerx - self.rect.centerx
-        speed = DIFFICULTIES[self.game.difficulty]["enemy_speed"]
-        if abs(distance) < 470:
+        if not self.alive: return
+        distance = self.game.player.rect.centerx - self.rect.centerx
+        if abs(distance) < 520:
             self.direction = 1 if distance > 8 else -1 if distance < -8 else self.direction
-            self.x += self.direction * speed * dt
+            self.x += self.direction * self.speed * dt
         self.rect.x = int(self.x)
-        old_bottom = self.rect.bottom
-        self.y += 1900 * dt
-        self.rect.y = int(self.y)
+        old_bottom = self.rect.bottom; self.y += 1900 * dt; self.rect.y = int(self.y)
         for platform in self.game.platforms:
             if self.rect.colliderect(platform) and old_bottom <= platform.top + 12:
-                self.rect.bottom = platform.top
-                self.y = float(self.rect.y)
-        self.animation_time += dt * 7
-        self.animation_frame = int(self.animation_time) % len(self.frames)
+                self.rect.bottom = platform.top; self.y = float(self.rect.y)
+        self.anim_time += dt * 7
+        self.frame = int(self.anim_time) % len(self.frames)
 
-    def draw(self, camera_x):
-        if not self.alive:
-            return
-        image = self.frames[self.animation_frame]
-        if self.direction < 0:
-            image = pygame.transform.flip(image, True, False)
-        screen.blit(image, (self.rect.x - camera_x, self.rect.y))
-        bar = pygame.Rect(self.rect.x - camera_x, self.rect.y - 12, self.width, 7)
+    def draw(self, camera):
+        if not self.alive: return
+        image = self.frames[self.frame]
+        if self.direction < 0: image = pygame.transform.flip(image, True, False)
+        screen.blit(image, (self.rect.x - camera, self.rect.y))
+        bar = pygame.Rect(self.rect.x - camera, self.rect.y - 12, self.rect.width, 7)
         pygame.draw.rect(screen, BLACK, bar)
-        pygame.draw.rect(screen, RED, (bar.x, bar.y, int(bar.width * max(self.health, 0) / self.max_health), bar.height))
+        pygame.draw.rect(screen, RED, (bar.x, bar.y, int(bar.width * max(self.health, 0) / self.max_health), 7))
 
 
-class MovingPlatform:
-    def __init__(self, x, y, w, h, distance, speed):
-        self.rect = pygame.Rect(x, y, w, h)
-        self.start_x, self.distance, self.speed, self.t = x, distance, speed, random.random() * 5
-        self.dx = 0
+class Boss(Enemy):
+    def __init__(self, game, x, y):
+        super().__init__(game, x, y, "brute")
+        self.rect = pygame.Rect(x, y, 120, 140); self.max_health = self.health = 850 * DIFFICULTIES[game.difficulty]["scale"]
+        self.damage = DIFFICULTIES[game.difficulty]["damage"] * 2.0; self.speed = 65
+        self.phase, self.cooldown, self.rage = 1, 1.2, False
+        self.frames = load_sheet("boss_sheet.png", (120, 140), RED, "BOSS", 4)
+
+    def take_damage(self, amount):
+        super().take_damage(amount)
+        if self.health <= self.max_health * .5 and self.phase == 1:
+            self.phase, self.rage = 2, True
+            sounds.play("boss"); self.game.floating.append(FloatingText("БЕЗДНА ПРОСЫПАЕТСЯ!", self.rect.centerx, self.rect.y - 25, RED))
 
     def update(self, dt):
-        old = self.rect.x
-        self.t += dt * self.speed
-        self.rect.x = int(self.start_x + math.sin(self.t) * self.distance)
-        self.dx = self.rect.x - old
+        if not self.alive: return
+        player = self.game.player; distance = player.rect.centerx - self.rect.centerx
+        self.direction = 1 if distance > 0 else -1
+        self.x += self.direction * self.speed * (1.45 if self.rage else 1) * dt
+        self.rect.x = int(self.x); self.cooldown -= dt
+        if self.cooldown <= 0 and abs(distance) < 850:
+            self.cooldown = .8 if self.rage else 1.35
+            self.game.projectiles.append(Projectile(self.rect.centerx, self.rect.centery, player.rect.centerx, player.rect.centery, RED, 16, 260))
+            self.game.burst(self.rect.centerx, self.rect.centery, RED, 10, gravity=0); sounds.play("boss")
+        self.anim_time += dt * (10 if self.rage else 5); self.frame = int(self.anim_time) % len(self.frames)
+
+    def draw(self, camera):
+        if not self.alive: return
+        image = self.frames[self.frame]
+        if self.direction < 0: image = pygame.transform.flip(image, True, False)
+        screen.blit(image, (self.rect.x - camera, self.rect.y))
+        bar = pygame.Rect(240, 18, 620, 20)
+        pygame.draw.rect(screen, BLACK, bar); pygame.draw.rect(screen, RED if self.rage else PURPLE, (bar.x, bar.y, int(bar.width * max(self.health, 0) / self.max_health), bar.height)); pygame.draw.rect(screen, WHITE, bar, 2)
+        draw_text("ВЛАДЫКА БЕЗДНЫ", font_small, WHITE, WIDTH // 2, 50)
+
+
+class Projectile:
+    def __init__(self, x, y, tx, ty, color, damage, speed):
+        self.x, self.y, self.color, self.damage, self.speed = x, y, color, damage, speed
+        length = max(1, math.hypot(tx - x, ty - y)); self.vx, self.vy = (tx - x) / length * speed, (ty - y) / length * speed
+        self.life = 4
+
+    def update(self, dt, game):
+        self.x += self.vx * dt; self.y += self.vy * dt; self.life -= dt
+        if pygame.Rect(int(self.x - 10), int(self.y - 10), 20, 20).colliderect(game.player.rect):
+            game.player.take_damage(self.damage); return False
+        return self.life > 0 and -50 < self.x < game.level_width + 50 and -50 < self.y < HEIGHT + 100
+
+    def draw(self, camera):
+        pygame.draw.circle(screen, self.color, (int(self.x - camera), int(self.y)), 10)
+        pygame.draw.circle(screen, WHITE, (int(self.x - camera), int(self.y)), 4)
 
 
 class Game:
     def __init__(self):
-        self.state, self.difficulty = "menu", "Средне"
-        self.level_width, self.level_height = 4700, 600
-        self.camera_x, self.score, self.coins, self.best_score = 0, 0, 0, load_best()
-        self.checkpoint_position = (150, 350)
-        self.time, self.shake = 0, 0
-        self.particles, self.floating = [], []
-        self.platforms, self.moving_platforms, self.hazards = [], [], []
-        self.checkpoints, self.coin_rects, self.enemies = [], [], []
-        self.player = Player(self)
-        self.menu_buttons = [Button((400, 270, 300, 58), "Начать игру"), Button((400, 340, 300, 58), "Настройки"), Button((400, 410, 300, 58), "Выход")]
-        self.settings_buttons = [Button((400, 270, 300, 58), "Сложность"), Button((400, 340, 300, 58), "Назад")]
+        self.state, self.difficulty = "menu", "Средне"; self.level_width, self.level_height = 4700, 600
+        self.camera, self.score, self.coins, self.best = 0, 0, 0, load_best(); self.time = self.shake = 0
+        self.checkpoint = (150, 350); self.particles, self.floating, self.projectiles = [], [], []
+        self.platforms, self.hazards, self.checkpoints, self.coins_rects = [], [], [], []
+        self.enemies, self.boss = [], None; self.player = Player(self)
+        self.menu = [Button((400, 270, 300, 58), "Начать игру"), Button((400, 340, 300, 58), "Настройки"), Button((400, 410, 300, 58), "Выход")]
+        self.settings = [Button((400, 270, 300, 58), "Сложность"), Button((400, 340, 300, 58), "Назад")]
         self.create_level()
 
     def create_level(self):
-        self.platforms = [pygame.Rect(0, 540, 700, 110), pygame.Rect(850, 540, 550, 110), pygame.Rect(1550, 540, 650, 110), pygame.Rect(2350, 540, 550, 110), pygame.Rect(3050, 540, 550, 110), pygame.Rect(3750, 540, 950, 110),
-                          pygame.Rect(430, 430, 190, 28), pygame.Rect(970, 390, 190, 28), pygame.Rect(1250, 300, 180, 28), pygame.Rect(1720, 410, 220, 28), pygame.Rect(2050, 320, 190, 28), pygame.Rect(2500, 420, 220, 28), pygame.Rect(2800, 300, 180, 28), pygame.Rect(3200, 410, 220, 28), pygame.Rect(3500, 300, 180, 28), pygame.Rect(3950, 390, 220, 28), pygame.Rect(4300, 280, 180, 28)]
-        self.moving_platforms = [MovingPlatform(710, 470, 130, 25, 75, 1.5), MovingPlatform(2200, 440, 130, 25, 110, 1.2), MovingPlatform(2910, 450, 120, 25, 90, 1.8)]
-        self.platforms += [p.rect for p in self.moving_platforms]
-        self.hazards = [pygame.Rect(700, 615, 150, 35), pygame.Rect(1400, 615, 150, 35), pygame.Rect(2200, 615, 150, 35), pygame.Rect(2900, 615, 150, 35), pygame.Rect(3600, 615, 150, 35)]
-        self.checkpoints = [pygame.Rect(1350, 490, 35, 50), pygame.Rect(2700, 490, 35, 50), pygame.Rect(3600, 490, 35, 50)]
-        self.coin_rects = [pygame.Rect(x, y, 28, 28) for x, y in [(470, 380), (570, 380), (1010, 340), (1290, 250), (1760, 360), (2100, 270), (2540, 370), (2840, 250), (3240, 360), (3540, 250), (3990, 340), (4350, 230)]]
-        self.enemies = [Enemy(self, x, y, kind) for x, y, kind in [(570, 462, "zombie"), (1080, 312, "vampire"), (1250, 222, "zombie"), (1800, 332, "vampire"), (2150, 242, "zombie"), (2600, 342, "vampire"), (3280, 332, "zombie"), (3550, 222, "vampire"), (3980, 312, "zombie"), (4380, 202, "vampire")]]
+        self.platforms = [pygame.Rect(0, 540, 700, 110), pygame.Rect(850, 540, 550, 110), pygame.Rect(1550, 540, 650, 110), pygame.Rect(2350, 540, 550, 110), pygame.Rect(3050, 540, 550, 110), pygame.Rect(3750, 540, 950, 110), pygame.Rect(430, 430, 190, 28), pygame.Rect(970, 390, 190, 28), pygame.Rect(1250, 300, 180, 28), pygame.Rect(1720, 410, 220, 28), pygame.Rect(2050, 320, 190, 28), pygame.Rect(2500, 420, 220, 28), pygame.Rect(2800, 300, 180, 28), pygame.Rect(3200, 410, 220, 28), pygame.Rect(3500, 300, 180, 28), pygame.Rect(3950, 390, 220, 28), pygame.Rect(4300, 320, 250, 28)]
+        self.hazards = [pygame.Rect(x, 615, 150, 35) for x in (700, 1400, 2200, 2900, 3600)]
+        self.checkpoints = [pygame.Rect(x, 490, 35, 50) for x in (1350, 2700, 3600)]
+        self.coins_rects = [pygame.Rect(x, y, 28, 28) for x, y in [(470,380),(570,380),(1010,340),(1290,250),(1760,360),(2100,270),(2540,370),(2840,250),(3240,360),(3540,250),(3990,340),(4370,260)]]
+        positions = [(570,462,"zombie"),(1080,312,"vampire"),(1250,222,"zombie"),(1800,332,"vampire"),(2150,242,"brute"),(2600,342,"vampire"),(3280,332,"zombie"),(3550,222,"brute"),(3980,312,"zombie")]
+        self.enemies = [Enemy(self, *item) for item in positions]; self.boss = Boss(self, 4300, 180)
 
     def burst(self, x, y, color, count=8, gravity=500):
-        for _ in range(count):
-            self.particles.append(Particle(x, y, color, random.uniform(.25, .65), random.uniform(60, 180), random.randint(2, 5), gravity))
+        self.particles += [Particle(x, y, color, random.uniform(.25, .65), random.uniform(60, 180), gravity) for _ in range(count)]
 
-    def start_game(self):
-        self.state, self.score, self.coins, self.camera_x = "playing", 0, 0, 0
-        self.checkpoint_position = (150, 350)
-        self.player.max_health = DIFFICULTIES[self.difficulty]["player_health"]
-        self.player.reset(self.checkpoint_position)
-        self.create_level()
+    def start(self):
+        self.state, self.score, self.coins, self.camera, self.checkpoint = "playing", 0, 0, 0, (150, 350)
+        self.player.max_health = DIFFICULTIES[self.difficulty]["health"]; self.player.reset(self.checkpoint); self.projectiles.clear(); self.create_level(); sounds.start_music()
 
-    def respawn_player(self):
-        self.player.reset(self.checkpoint_position)
-        self.burst(*self.checkpoint_position, RED, 12)
-
-    def update_checkpoint(self):
-        for checkpoint in self.checkpoints:
-            if self.player.rect.colliderect(checkpoint) and checkpoint.x > self.checkpoint_position[0]:
-                self.checkpoint_position = (checkpoint.x, checkpoint.y - self.player.height)
-                self.score += 200
-                self.floating.append(FloatingText("ЧЕКПОИНТ  +200", checkpoint.x, checkpoint.y - 25, GOLD))
-                self.burst(checkpoint.centerx, checkpoint.centery, GOLD, 18)
-
-    def collect_coins(self):
-        left = []
-        for coin in self.coin_rects:
-            if self.player.rect.colliderect(coin):
-                self.coins += 1
-                self.score += 100
-                self.floating.append(FloatingText("+100", coin.centerx, coin.y, GOLD))
-                self.burst(coin.centerx, coin.centery, GOLD, 12, gravity=0)
-            else:
-                left.append(coin)
-        self.coin_rects = left
+    def respawn(self):
+        self.player.reset(self.checkpoint); self.burst(*self.checkpoint, RED, 15)
 
     def update(self, dt):
-        self.time += dt
-        self.shake = max(0, self.shake - 22 * dt)
-        if self.state != "playing":
-            self.particles = [p for p in self.particles if p.update(dt)]
-            self.floating = [f for f in self.floating if f.update(dt)]
-            return
-        for moving in self.moving_platforms:
-            moving.update(dt)
-        keys = pygame.key.get_pressed()
-        self.player.update(dt, keys)
-        for enemy in self.enemies:
-            enemy.update(dt)
-        self.update_checkpoint()
-        self.collect_coins()
-        self.particles = [p for p in self.particles if p.update(dt)]
-        self.floating = [f for f in self.floating if f.update(dt)]
-        self.score += dt * 10
-        self.camera_x = clamp(self.player.rect.centerx - WIDTH // 2, 0, self.level_width - WIDTH)
-        if self.player.rect.x > 4450:
-            self.state = "victory"
-            self.best_score = max(self.best_score, int(self.score))
-            save_best(self.best_score)
+        self.time += dt; self.shake = max(0, self.shake - 20 * dt)
+        self.particles = [p for p in self.particles if p.update(dt)]; self.floating = [f for f in self.floating if f.update(dt)]
+        if self.state != "playing": return
+        self.player.update(dt, pygame.key.get_pressed())
+        for enemy in self.enemies: enemy.update(dt)
+        if self.boss: self.boss.update(dt)
+        self.projectiles = [p for p in self.projectiles if p.update(dt, self)]
+        for checkpoint in self.checkpoints:
+            if self.player.rect.colliderect(checkpoint) and checkpoint.x > self.checkpoint[0]:
+                self.checkpoint = (checkpoint.x, checkpoint.y - self.player.rect.height); self.score += 200; self.floating.append(FloatingText("ЧЕКПОИНТ +200", checkpoint.x, checkpoint.y, GOLD)); self.burst(checkpoint.centerx, checkpoint.centery, GOLD, 18)
+        remaining = []
+        for coin in self.coins_rects:
+            if self.player.rect.colliderect(coin): self.coins += 1; self.score += 100; sounds.play("coin"); self.burst(coin.centerx, coin.centery, GOLD, 12, 0)
+            else: remaining.append(coin)
+        self.coins_rects = remaining; self.score += dt * 10
+        self.camera = clamp(self.player.rect.centerx - WIDTH // 2, 0, self.level_width - WIDTH)
+        if self.boss and not self.boss.alive and self.player.rect.x > 4450:
+            self.state = "victory"; self.best = max(self.best, int(self.score)); save_best(self.best); sounds.play("victory")
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                if self.state in ("playing", "paused", "settings", "victory"):
-                    self.state = "menu"
+            if event.key == pygame.K_ESCAPE and self.state in ("playing", "paused", "settings", "victory"): self.state = "menu"
             elif self.state == "playing":
-                if event.key == pygame.K_p:
-                    self.state = "paused"
-                elif event.key in (pygame.K_SPACE, pygame.K_w, pygame.K_UP):
-                    self.player.jump_buffer = .14
-                elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
-                    self.player.dash()
-            elif self.state == "paused" and event.key in (pygame.K_p, pygame.K_ESCAPE):
-                self.state = "playing"
+                if event.key == pygame.K_p: self.state = "paused"
+                elif event.key in (pygame.K_SPACE, pygame.K_w, pygame.K_UP): self.player.jump_buffer = .14
+                elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT): self.player.dash()
+            elif self.state == "paused" and event.key == pygame.K_p: self.state = "playing"
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
             if self.state == "menu":
-                if self.menu_buttons[0].rect.collidepoint(pos): self.start_game()
-                elif self.menu_buttons[1].rect.collidepoint(pos): self.state = "settings"
-                elif self.menu_buttons[2].rect.collidepoint(pos): pygame.quit(); sys.exit()
+                if self.menu[0].rect.collidepoint(pos): self.start()
+                elif self.menu[1].rect.collidepoint(pos): self.state = "settings"
+                elif self.menu[2].rect.collidepoint(pos): pygame.quit(); sys.exit()
             elif self.state == "settings":
-                if self.settings_buttons[0].rect.collidepoint(pos):
-                    names = list(DIFFICULTIES); self.difficulty = names[(names.index(self.difficulty) + 1) % len(names)]
-                elif self.settings_buttons[1].rect.collidepoint(pos): self.state = "menu"
+                if self.settings[0].rect.collidepoint(pos):
+                    names = list(DIFFICULTIES); self.difficulty = names[(names.index(self.difficulty) + 1) % len(names)]; sounds.play("click")
+                elif self.settings[1].rect.collidepoint(pos): self.state = "menu"
             elif self.state == "victory": self.state = "menu"
 
-    def draw_background(self):
+    def background(self):
         for y in range(HEIGHT):
-            ratio = y / HEIGHT
-            color = (int(SKY[0] + ratio * 25), int(SKY[1] + ratio * 25), int(SKY[2] + ratio * 38))
-            pygame.draw.line(screen, color, (0, y), (WIDTH, y))
-        # Луна и параллакс-слои создают ощущение движ��ния.
-        moon_x = int(850 - self.camera_x * .08)
-        pygame.draw.circle(screen, (240, 230, 175), (moon_x, 100), 55)
-        for layer, color, base in [(.12, (35, 45, 78), 460), (.25, (28, 38, 66), 500)]:
-            points = []
-            for x in range(-100, WIDTH + 150, 170):
-                world_x = x + self.camera_x * layer
-                points.extend([(x, int(base - 180 * math.sin(world_x / 210) - 55 * math.sin(world_x / 85)),)])
-            pygame.draw.polygon(screen, color, [(0, HEIGHT)] + points + [(WIDTH, HEIGHT)])
-        # Звёзды слегка мерцают.
-        random.seed(22)
-        for _ in range(45):
-            x = (random.randint(0, WIDTH) - int(self.camera_x * .04)) % WIDTH
-            y = random.randint(35, 280)
-            brightness = 130 + int(80 * (math.sin(self.time * 2 + x) + 1) / 2)
-            pygame.draw.circle(screen, (brightness, brightness, 210), (x, y), 1)
+            ratio = y / HEIGHT; pygame.draw.line(screen, (int(SKY[0]+ratio*25), int(SKY[1]+ratio*25), int(SKY[2]+ratio*40)), (0,y), (WIDTH,y))
+        pygame.draw.circle(screen, (240,230,175), (int(850-self.camera*.08), 100), 55)
+        random.seed(8)
+        for _ in range(55):
+            x = (random.randrange(WIDTH) - int(self.camera*.04)) % WIDTH; y = random.randrange(40, 280)
+            pygame.draw.circle(screen, (150+int(70*(math.sin(self.time*2+x)+1)/2), 160, 210), (x,y), 1)
         random.seed()
+        for layer, color, base in ((.12,(35,45,78),460),(.25,(28,38,66),500)):
+            points = [(x, int(base - 120*math.sin((x+self.camera*layer)/210))) for x in range(-100, WIDTH+150, 100)]
+            pygame.draw.polygon(screen, color, [(0,HEIGHT)] + points + [(WIDTH,HEIGHT)])
 
     def draw_level(self):
-        self.draw_background()
+        self.background()
         for platform in self.platforms:
-            r = platform.copy(); r.x -= int(self.camera_x)
-            if r.right < 0 or r.left > WIDTH: continue
-            pygame.draw.rect(screen, DARK_GRAY, r, border_radius=5)
-            pygame.draw.rect(screen, GREEN, (r.x, r.y, r.width, 8), border_radius=4)
+            r = platform.copy(); r.x -= int(self.camera); pygame.draw.rect(screen, DARK_GRAY, r, border_radius=5); pygame.draw.rect(screen, GREEN, (r.x,r.y,r.width,8), border_radius=4)
         for hazard in self.hazards:
-            r = hazard.copy(); r.x -= int(self.camera_x)
-            for x in range(r.left, r.right, 18):
-                pygame.draw.polygon(screen, RED, [(x, r.bottom), (x + 9, r.top), (x + 18, r.bottom)])
+            r = hazard.copy(); r.x -= int(self.camera)
+            for x in range(r.left, r.right, 18): pygame.draw.polygon(screen, RED, [(x,r.bottom),(x+9,r.top),(x+18,r.bottom)])
         for checkpoint in self.checkpoints:
-            x = checkpoint.x - self.camera_x
-            pygame.draw.line(screen, WHITE, (x + 15, checkpoint.y), (x + 15, checkpoint.y + 50), 4)
-            pygame.draw.polygon(screen, GOLD, [(x + 17, checkpoint.y), (x + 55, checkpoint.y + 14), (x + 17, checkpoint.y + 28)])
-        for coin in self.coin_rects:
-            r = coin.copy(); r.x -= int(self.camera_x)
-            pulse = int(2 * math.sin(self.time * 6 + coin.x))
-            pygame.draw.circle(screen, GOLD, r.center, 14 + pulse)
-            pygame.draw.circle(screen, (255, 245, 160), r.center, 7)
-        for enemy in self.enemies: enemy.draw(self.camera_x)
-        self.player.draw(self.camera_x)
-        for particle in self.particles: particle.draw(self.camera_x)
-        for text in self.floating: text.draw(self.camera_x)
-        finish_x = 4450 - self.camera_x
-        pygame.draw.line(screen, WHITE, (finish_x, 350), (finish_x, 540), 5)
-        draw_text("ФИНИШ", font_small, GOLD, finish_x, 320)
-        # HUD panel.
-        pygame.draw.rect(screen, (8, 10, 20, 180), (12, 12, 300, 106), border_radius=10)
-        pygame.draw.rect(screen, BLACK, (25, 25, 180, 15)); pygame.draw.rect(screen, RED, (25, 25, int(180 * max(self.player.health, 0) / self.player.max_health), 15))
-        pygame.draw.rect(screen, WHITE, (25, 25, 180, 15), 2)
-        draw_text(f"Счёт: {int(self.score)}", font_small, WHITE, 25, 48, False)
-        draw_text(f"Монеты: {self.coins}   Лучший: {self.best_score}", font_small, GOLD, 25, 77, False)
-        draw_text("A/D — ходьба   SPACE — прыжок   F — удар", font_tiny, WHITE, WIDTH - 390, 18, False)
-        draw_text("SHIFT — рывок   P — пауза", font_tiny, WHITE, WIDTH - 250, 42, False)
-
-    def draw_menu(self):
-        self.draw_background(); draw_text("SHADOW PARKOUR", font_title, WHITE, WIDTH // 2, 135)
-        draw_text("Живой платформер без обязательных текстур", font_medium, BLUE, WIDTH // 2, 205)
-        for button in self.menu_buttons: button.update(pygame.mouse.get_pos()); button.draw()
-        draw_text(f"Сложность: {self.difficulty}     Лучший счёт: {self.best_score}", font_small, GRAY, WIDTH // 2, 525)
-
-    def draw_settings(self):
-        self.draw_background(); draw_text("НАСТРОЙКИ", font_title, WHITE, WIDTH // 2, 145)
-        for button in self.settings_buttons: button.update(pygame.mouse.get_pos()); button.draw()
-        draw_text(f"Текущая сложность: {self.difficulty}", font_medium, GOLD, WIDTH // 2, 455)
-        draw_text("Прыжок можно сделать дважды, SHIFT — рывок", font_small, GRAY, WIDTH // 2, 505)
-
-    def draw_pause(self):
-        self.draw_level(); overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); overlay.fill((0, 0, 0, 175)); screen.blit(overlay, (0, 0))
-        draw_text("ПАУЗА", font_title, WHITE, WIDTH // 2, 250); draw_text("P — продолжить   ESC — меню", font_medium, GRAY, WIDTH // 2, 350)
-
-    def draw_victory(self):
-        self.draw_background(); draw_text("ПОБЕДА!", font_title, GOLD, WIDTH // 2, 180)
-        draw_text("Ты прошёл весь уровень", font_big, WHITE, WIDTH // 2, 275)
-        draw_text(f"Счёт: {int(self.score)}    Монет: {self.coins}", font_medium, GOLD, WIDTH // 2, 360)
-        draw_text(f"Рекорд: {self.best_score}", font_medium, WHITE, WIDTH // 2, 405)
-        draw_text("Нажми мышкой или ESC, чтобы вернуться в меню", font_small, GRAY, WIDTH // 2, 490)
+            x = checkpoint.x - self.camera; pygame.draw.line(screen, WHITE, (x+15,checkpoint.y), (x+15,checkpoint.y+50),4); pygame.draw.polygon(screen,GOLD,[(x+17,checkpoint.y),(x+55,checkpoint.y+14),(x+17,checkpoint.y+28)])
+        for coin in self.coins_rects:
+            r=coin.copy(); r.x-=int(self.camera); pygame.draw.circle(screen,GOLD,r.center,14+int(2*math.sin(self.time*6+coin.x))); pygame.draw.circle(screen,(255,245,160),r.center,7)
+        for enemy in self.enemies: enemy.draw(self.camera)
+        if self.boss: self.boss.draw(self.camera)
+        for projectile in self.projectiles: projectile.draw(self.camera)
+        self.player.draw(self.camera)
+        for particle in self.particles: particle.draw(self.camera)
+        for text in self.floating: text.draw(self.camera)
+        pygame.draw.line(screen, WHITE, (4450-self.camera,350), (4450-self.camera,540),5)
+        draw_text("ФИНИШ ПОСЛЕ БОССА", font_small, GOLD, 4450-self.camera, 320)
+        pygame.draw.rect(screen,(8,10,20), (12,12,310,108), border_radius=10); pygame.draw.rect(screen,BLACK,(25,25,180,15)); pygame.draw.rect(screen,RED,(25,25,int(180*max(self.player.health,0)/self.player.max_health),15)); pygame.draw.rect(screen,WHITE,(25,25,180,15),2)
+        draw_text(f"Счёт: {int(self.score)}",font_small,WHITE,25,48,False); draw_text(f"Монеты: {self.coins}   Рекорд: {self.best}",font_small,GOLD,25,77,False); draw_text("A/D движение  SPACE прыжок  F удар  SHIFT рывок  P пауза",font_tiny,WHITE,WIDTH-470,18,False)
 
     def draw(self):
-        # Небольшая тряска камеры только при попаданиях/рывке.
-        offset = (random.randint(-int(self.shake), int(self.shake)), random.randint(-int(self.shake), int(self.shake))) if self.shake > 0 else (0, 0)
-        if offset != (0, 0):
-            canvas = pygame.Surface((WIDTH, HEIGHT)); canvas.blit(screen, offset)
-        if self.state == "menu": self.draw_menu()
-        elif self.state == "settings": self.draw_settings()
-        elif self.state in ("playing", "paused"): self.draw_pause() if self.state == "paused" else self.draw_level()
-        elif self.state == "victory": self.draw_victory()
+        if self.state == "menu":
+            self.background(); draw_text("SHADOW PARKOUR",font_title,WHITE,WIDTH//2,135); draw_text("NIGHTFALL — охота на Владыку Бездны",font_medium,BLUE,WIDTH//2,205)
+            for b in self.menu: b.update(pygame.mouse.get_pos()); b.draw()
+            draw_text(f"Сложность: {self.difficulty}    Рекорд: {self.best}",font_small,GRAY,WIDTH//2,525)
+        elif self.state == "settings":
+            self.background(); draw_text("НАСТРОЙКИ",font_title,WHITE,WIDTH//2,145)
+            for b in self.settings: b.update(pygame.mouse.get_pos()); b.draw()
+            draw_text(f"Текущая сложность: {self.difficulty}",font_medium,GOLD,WIDTH//2,455); draw_text("В игре есть двойной прыжок, рывок и босс",font_small,GRAY,WIDTH//2,505)
+        elif self.state == "playing": self.draw_level()
+        elif self.state == "paused":
+            self.draw_level(); overlay=pygame.Surface((WIDTH,HEIGHT),pygame.SRCALPHA); overlay.fill((0,0,0,175)); screen.blit(overlay,(0,0)); draw_text("ПАУЗА",font_title,WHITE,WIDTH//2,250); draw_text("P — продолжить  ESC — меню",font_medium,GRAY,WIDTH//2,350)
+        else:
+            self.background(); draw_text("ПОБЕДА!",font_title,GOLD,WIDTH//2,180); draw_text("Владыка Бездны повержен",font_big,WHITE,WIDTH//2,275); draw_text(f"Счёт: {int(self.score)}   Монеты: {self.coins}",font_medium,GOLD,WIDTH//2,360); draw_text(f"Рекорд: {self.best}",font_medium,WHITE,WIDTH//2,405); draw_text("Мышь или ESC — вернуться в меню",font_small,GRAY,WIDTH//2,490)
 
 
 def main():
