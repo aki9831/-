@@ -20,7 +20,7 @@ except pygame.error:
 
 WIDTH, HEIGHT, FPS = 1100, 650, 60
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Shadow Parkour: Nightfall")
+pygame.display.set_caption("Shadow Parkour: Nightfall — Deluxe")
 clock = pygame.time.Clock()
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,6 +44,8 @@ GOLD = (255, 210, 70)
 BLUE = (75, 150, 240)
 ORANGE = (240, 135, 55)
 CYAN = (75, 220, 220)
+TEAL = (52, 200, 180)
+PINK = (240, 100, 180)
 
 # Шрифты
 font_title = pygame.font.SysFont("arial", 72, bold=True)
@@ -51,6 +53,41 @@ font_big = pygame.font.SysFont("arial", 44, bold=True)
 font_medium = pygame.font.SysFont("arial", 28, bold=True)
 font_small = pygame.font.SysFont("arial", 20)
 font_tiny = pygame.font.SysFont("arial", 15)
+
+
+def clamp(value, minimum, maximum):
+    return max(minimum, min(value, maximum))
+
+
+def draw_text(text, font, color, x, y, center=True):
+    image = font.render(str(text), True, color)
+    rect = image.get_rect()
+    if center:
+        rect.center = (x, y)
+    else:
+        rect.topleft = (x, y)
+    screen.blit(image, rect)
+
+
+def fallback_surface(size, color, label=""):
+    surface = pygame.Surface(size, pygame.SRCALPHA)
+    surface.fill(color)
+    pygame.draw.rect(surface, BLACK, surface.get_rect(), 3)
+
+    for x in range(-size[1], size[0], 16):
+        pygame.draw.line(
+            surface,
+            (255, 255, 255, 45),
+            (x, 0),
+            (x + size[1], size[1]),
+            2,
+        )
+
+    if label:
+        text = font_tiny.render(label, True, WHITE)
+        surface.blit(text, text.get_rect(center=surface.get_rect().center))
+    return surface
+
 
 DIFFICULTIES = {
     "Легко": {
@@ -79,90 +116,23 @@ DIFFICULTIES = {
     },
 }
 
+CHARACTER_PRESETS = {
+    "Knight": {"speed": 320, "jump": 860, "health": 170, "attack": 42, "dash": 1010},
+    "Ranger": {"speed": 350, "jump": 830, "health": 140, "attack": 38, "dash": 1100},
+    "Mage": {"speed": 300, "jump": 900, "health": 125, "attack": 56, "dash": 1040},
+}
 
-# ============================================================
-# ЗАГЛУШКИ И ЗВУК
-# ============================================================
-
-def fallback_surface(size, color, label=""):
-    surface = pygame.Surface(size, pygame.SRCALPHA)
-    surface.fill(color)
-    pygame.draw.rect(surface, BLACK, surface.get_rect(), 3)
-
-    for x in range(-size[1], size[0], 16):
-        pygame.draw.line(
-            surface,
-            (255, 255, 255, 45),
-            (x, 0),
-            (x + size[1], size[1]),
-            2,
-        )
-
-    if label:
-        text = font_tiny.render(label, True, WHITE)
-        surface.blit(text, text.get_rect(center=surface.get_rect().center))
-
-    return surface
-
-
-IMAGE_CACHE = {}
-
-
-def load_sheet(filename, frame_size, color, label, frame_count=4):
-    """
-    Поддержка sprite-sheet: ряд кадров лежит горизонтально слева направо.
-    Если файла нет или он битый — создаёт заглушку.
-    """
-    key = (filename, frame_size, color, label, frame_count)
-    if key in IMAGE_CACHE:
-        return IMAGE_CACHE[key]
-
-    path = TEXTURES_DIR / filename
-    frames = []
-
-    try:
-        image = pygame.image.load(str(path)).convert_alpha()
-        for i in range(frame_count):
-            rect = pygame.Rect(
-                i * frame_size[0],
-                0,
-                frame_size[0],
-                frame_size[1],
-            )
-            if rect.right <= image.get_width() and rect.bottom <= image.get_height():
-                frame = image.subsurface(rect).copy()
-                frame = pygame.transform.smoothscale(frame, frame_size)
-                frames.append(frame)
-
-        if not frames:
-            raise pygame.error("sprite-sheet has no valid frames")
-
-    except (pygame.error, FileNotFoundError, OSError):
-        frames = [
-            fallback_surface(frame_size, color, f"{label} {i + 1}")
-            for i in range(frame_count)
-        ]
-
-    IMAGE_CACHE[key] = frames
-    return frames
-
-
-def load_image(filename, size, color, label):
-    path = TEXTURES_DIR / filename
-    try:
-        image = pygame.image.load(str(path)).convert_alpha()
-        return pygame.transform.smoothscale(image, size)
-    except (pygame.error, FileNotFoundError, OSError):
-        return fallback_surface(size, color, label)
-
-
-def clamp(value, minimum, maximum):
-    return max(minimum, min(value, maximum))
+QUESTS = [
+    "Соберите 5 артефактов",
+    "Победите босса в первом уровне",
+    "Пройдите портал на второй уровень",
+    "Победите финального босса",
+]
 
 
 def save_best(value):
     try:
-        SAVE_FILE.write_text(json.dumps({"best": int(value)}), encoding="utf-8")
+        SAVE_FILE.write_text(json.dumps({"best": int(value)}, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
 
@@ -175,28 +145,26 @@ def load_best():
         return 0
 
 
+# ============================================================
+# ЗВУК
+# ============================================================
+
 class SoundManager:
-    """
-    Если .wav/.ogg нет — генерирует короткий beep.
-    Это позволяет игре работать без звуковой папки.
-    """
     def __init__(self):
         self.sounds = {}
         for name, (frequency, duration) in {
-    "jump": (520, .09),
-    "dash": (180, .12),
-    "hit": (90, .10),
-    "coin": (880, .10),
-    "hurt": (120, .16),
-    "boss": (55, .35),
-    "victory": (660, .35),
-    "click": (300, .06),
-}.items():
-    self.sounds[name] = self.load_or_beep(
-        name,
-        frequency,
-        duration,
-    )
+            "jump": (520, 0.09),
+            "dash": (180, 0.12),
+            "hit": (90, 0.10),
+            "coin": (880, 0.10),
+            "hurt": (120, 0.16),
+            "boss": (55, 0.35),
+            "victory": (660, 0.35),
+            "click": (300, 0.06),
+            "shoot": (300, 0.08),
+            "heal": (500, 0.12),
+            "special": (640, 0.14),
+        }.items():
             self.sounds[name] = self._load_or_beep(name, frequency, duration)
 
         self.music = None
@@ -229,14 +197,12 @@ class SoundManager:
         sample_rate = 44100
         samples = array("h")
         total_samples = int(sample_rate * duration)
-
         for i in range(total_samples):
             t = i / sample_rate
             env = 1.0 - (i / total_samples)
             wave = math.sin(2 * math.pi * frequency * t)
             value = int(12000 * env * wave)
             samples.append(value)
-
         try:
             return pygame.mixer.Sound(buffer=samples.tobytes())
         except (pygame.error, ValueError):
@@ -259,11 +225,8 @@ class SoundManager:
                 pass
 
 
-sound = SoundManager()
-
-
 # ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ КЛАССЫ
+# ЭФФЕКТЫ
 # ============================================================
 
 class Particle:
@@ -288,12 +251,7 @@ class Particle:
 
     def draw(self, camera_x):
         radius = max(1, int(self.size * self.life / self.max_life))
-        pygame.draw.circle(
-            screen,
-            self.color,
-            (int(self.x - camera_x), int(self.y)),
-            radius,
-        )
+        pygame.draw.circle(screen, self.color, (int(self.x - camera_x), int(self.y)), radius)
 
 
 class FloatingText:
@@ -316,47 +274,21 @@ class FloatingText:
 
 
 class Button:
-    def __init__(self, rect, text):
+    def __init__(self, rect, text, color=BLUE, hover_color=CYAN):
         self.rect = pygame.Rect(rect)
         self.text = text
+        self.color = color
+        self.hover_color = hover_color
         self.hovered = False
 
     def update(self, mouse_position):
         self.hovered = self.rect.collidepoint(mouse_position)
 
     def draw(self):
-        color = BLUE if self.hovered else DARK_GRAY
-
-        pygame.draw.rect(
-            screen,
-            color,
-            self.rect,
-            border_radius=12,
-        )
-        pygame.draw.rect(
-            screen,
-            WHITE,
-            self.rect,
-            width=2,
-            border_radius=12,
-        )
-        draw_text(
-            self.text,
-            font_medium,
-            WHITE,
-            self.rect.centerx,
-            self.rect.centery,
-        )
-
-
-def draw_text(text, font, color, x, y, center=True):
-    image = font.render(str(text), True, color)
-    rect = image.get_rect()
-    if center:
-        rect.center = (x, y)
-    else:
-        rect.topleft = (x, y)
-    screen.blit(image, rect)
+        color = self.hover_color if self.hovered else self.color
+        pygame.draw.rect(screen, color, self.rect, border_radius=12)
+        pygame.draw.rect(screen, WHITE, self.rect, width=2, border_radius=12)
+        draw_text(self.text, font_medium, WHITE, self.rect.centerx, self.rect.centery)
 
 
 # ============================================================
@@ -364,15 +296,22 @@ def draw_text(text, font, color, x, y, center=True):
 # ============================================================
 
 class Player:
-    def __init__(self, game):
+    def __init__(self, game, character_name):
         self.game = game
+        self.character_name = character_name
+        preset = CHARACTER_PRESETS[character_name]
         self.width = 58
         self.height = 82
+        self.speed = preset["speed"]
+        self.jump_power = preset["jump"]
+        self.max_health = preset["health"]
+        self.health = self.max_health
+        self.attack_damage = preset["attack"]
+        self.dash_speed = preset["dash"]
 
         self.rect = pygame.Rect(150, 350, self.width, self.height)
         self.x = float(self.rect.x)
         self.y = float(self.rect.y)
-
         self.vx = 0.0
         self.vy = 0.0
         self.direction = 1
@@ -380,22 +319,25 @@ class Player:
         self.coyote_time = 0.0
         self.jump_buffer = 0.0
         self.double_jump = True
-
-        self.health = 100
-        self.max_health = 100
+        self.jump_count = 0
         self.invulnerability = 0.0
         self.attack_timer = 0.0
         self.attack_cooldown = 0.0
         self.dash_timer = 0.0
         self.dash_cooldown = 0.0
-
-        self.animation_time = 0
+        self.ranged_cooldown = 0.0
+        self.slide_timer = 0.0
+        self.special_cooldown = 0.0
+        self.stamina = 100.0
+        self.max_stamina = 100.0
+        self.animation_time = 0.0
         self.frame = 0
 
-        self.frames_idle = load_sheet("player_idle.png", (58, 82), BLUE, "IDLE", 4)
-        self.frames_run = load_sheet("player_run.png", (58, 82), GREEN, "RUN", 6)
-        self.frames_jump = load_sheet("player_jump.png", (58, 82), ORANGE, "JUMP", 2)
-        self.frames_attack = load_sheet("player_attack.png", (58, 82), RED, "ATTACK", 4)
+        self.frames_idle = [fallback_surface((58, 82), BLUE, "IDLE") for _ in range(4)]
+        self.frames_run = [fallback_surface((58, 82), GREEN, "RUN") for _ in range(6)]
+        self.frames_jump = [fallback_surface((58, 82), ORANGE, "JUMP") for _ in range(2)]
+        self.frames_attack = [fallback_surface((58, 82), RED, "ATTACK") for _ in range(4)]
+        self.frames_slide = [fallback_surface((58, 82), TEAL, "SLIDE") for _ in range(2)]
 
     def reset(self, position):
         self.x = float(position[0])
@@ -404,127 +346,278 @@ class Player:
         self.vx = 0.0
         self.vy = 0.0
         self.health = self.max_health
+        self.stamina = self.max_stamina
         self.invulnerability = 0.9
         self.double_jump = True
+        self.jump_count = 0
         self.attack_timer = 0.0
         self.attack_cooldown = 0.0
         self.dash_timer = 0.0
         self.dash_cooldown = 0.0
+        self.ranged_cooldown = 0.0
+        self.slide_timer = 0.0
+        self.special_cooldown = 0.0
 
     def jump_action(self):
-        difficulty = DIFFICULTIES[self.game.difficulty]
         if self.on_ground or self.coyote_time > 0:
-            self.vy = -difficulty["jump_power"]
+            self.vy = -self.jump_power
             self.on_ground = False
             self.coyote_time = 0.0
-            sound.play("jump")
+            self.jump_count = 1
+            self.game.sound.play("jump")
             self.game.burst(self.rect.centerx, self.rect.bottom, CYAN, 10)
             return
 
-        if self.double_jump:
-            self.vy = -difficulty["jump_power"] * 0.82
+        if self.double_jump and self.jump_count < 2:
+            self.vy = -self.jump_power * 0.82
             self.double_jump = False
+            self.jump_count += 1
+            self.game.sound.play("jump")
             self.game.burst(self.rect.centerx, self.rect.centery, ORANGE, 12)
-            sound.play("jump")
 
-    def attack(self):
-        if self.attack_cooldown > 0:
+    def melee_attack(self):
+        if self.attack_cooldown > 0 or self.stamina < 12:
             return
-
-        self.attack_timer = 0.25
-        self.attack_cooldown = 0.42
+        self.attack_timer = 0.22
+        self.attack_cooldown = 0.32
+        self.stamina = max(0, self.stamina - 12)
 
         hit_rect = pygame.Rect(
-            self.rect.right if self.direction > 0 else self.rect.left - 70,
-            self.rect.y + 15,
-            70,
+            self.rect.right if self.direction > 0 else self.rect.left - 90,
+            self.rect.y + 10,
+            90,
             52,
         )
         self.game.burst(hit_rect.centerx, hit_rect.centery, GOLD, 7, gravity=0)
 
         for enemy in self.game.enemies:
             if enemy.alive and hit_rect.colliderect(enemy.rect):
-                enemy.take_damage(35)
+                enemy.take_damage(self.attack_damage + self.game.upgrade_levels.get("melee", 0) * 6)
                 self.game.score += 25
-                self.game.floating.append(
-                    FloatingText("+25", enemy.rect.centerx, enemy.rect.y, GOLD)
-                )
+                self.game.floating.append(FloatingText("+25", enemy.rect.centerx, enemy.rect.y, GOLD))
 
         if self.game.boss and self.game.boss.alive and hit_rect.colliderect(self.game.boss.rect):
-            self.game.boss.take_damage(35)
+            self.game.boss.take_damage(self.attack_damage + self.game.upgrade_levels.get("melee", 0) * 6)
             self.game.score += 25
 
+        self.game.sound.play("hit")
+
+    def ranged_attack(self):
+        if self.ranged_cooldown > 0 or self.stamina < 18:
+            return
+        self.ranged_cooldown = 0.35
+        self.stamina = max(0, self.stamina - 18)
+        self.game.projectiles.append(
+            Projectile(
+                self.rect.centerx + self.direction * 28,
+                self.rect.centery - 8,
+                self.direction * 520,
+                0,
+                PINK,
+                self.attack_damage + self.game.upgrade_levels.get("magic", 0) * 8,
+                520,
+                is_player=True,
+            )
+        )
+        self.game.sound.play("shoot")
+
+    def special_attack(self):
+        if self.special_cooldown > 0 or self.stamina < 35:
+            return
+        self.special_cooldown = 2.0
+        self.stamina = max(0, self.stamina - 35)
+        self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 22, gravity=0)
+        self.game.sound.play("special")
+
+        if self.character_name == "Knight":
+            for enemy in self.game.enemies:
+                if enemy.alive and abs(enemy.rect.centerx - self.rect.centerx) < 140 and abs(enemy.rect.centery - self.rect.centery) < 110:
+                    enemy.take_damage(90)
+                    self.game.score += 80
+                    self.game.floating.append(FloatingText("SLASH", enemy.rect.centerx, enemy.rect.y, RED))
+            if self.game.boss and self.game.boss.alive and abs(self.game.boss.rect.centerx - self.rect.centerx) < 180:
+                self.game.boss.take_damage(100)
+                self.game.score += 100
+
+        elif self.character_name == "Ranger":
+            for enemy in self.game.enemies:
+                if enemy.alive:
+                    dx = enemy.rect.centerx - self.rect.centerx
+                    dy = enemy.rect.centery - self.rect.centery
+                    length = max(1.0, math.hypot(dx, dy))
+                    self.game.projectiles.append(
+                        Projectile(
+                            self.rect.centerx,
+                            self.rect.centery,
+                            (dx / length) * 700,
+                            (dy / length) * 700,
+                            GOLD,
+                            65,
+                            700,
+                            is_player=True,
+                        )
+                    )
+            if self.game.boss and self.game.boss.alive:
+                dx = self.game.boss.rect.centerx - self.rect.centerx
+                dy = self.game.boss.rect.centery - self.rect.centery
+                length = max(1.0, math.hypot(dx, dy))
+                self.game.projectiles.append(
+                    Projectile(
+                        self.rect.centerx,
+                        self.rect.centery,
+                        (dx / length) * 700,
+                        (dy / length) * 700,
+                        GOLD,
+                        75,
+                        700,
+                        is_player=True,
+                    )
+                )
+
+        elif self.character_name == "Mage":
+            for enemy in self.game.enemies:
+                if enemy.alive:
+                    enemy.take_damage(120)
+                    self.game.score += 90
+                    self.game.floating.append(FloatingText("ARCANE", enemy.rect.centerx, enemy.rect.y, PINK))
+            if self.game.boss and self.game.boss.alive:
+                self.game.boss.take_damage(140)
+                self.game.score += 120
+
     def dash(self):
-        if self.dash_cooldown <= 0:
-            self.dash_timer = 0.14
-            self.dash_cooldown = 0.8
-            self.vx = self.direction * 950
-            self.invulnerability = max(self.invulnerability, 0.2)
-            sound.play("dash")
-            self.game.shake = max(self.game.shake, 5)
-            self.game.burst(self.rect.centerx, self.rect.centery, BLUE, 18, gravity=0)
+        if self.dash_cooldown > 0 or self.stamina < 18:
+            return
+        self.dash_timer = 0.14
+        self.dash_cooldown = 0.75
+        self.stamina = max(0, self.stamina - 18)
+        self.vx = self.direction * self.dash_speed
+        self.invulnerability = max(self.invulnerability, 0.2)
+        self.game.sound.play("dash")
+        self.game.shake = max(self.game.shake, 5)
+        self.game.burst(self.rect.centerx, self.rect.centery, BLUE, 18, gravity=0)
+
+    def slide(self):
+        if self.on_ground and self.slide_timer <= 0 and self.stamina >= 10:
+            self.slide_timer = 0.42
+            self.stamina = max(0, self.stamina - 10)
+            self.vx = self.direction * 430
 
     def take_damage(self, amount):
         if self.invulnerability > 0:
             return
-
         self.health -= amount
-        self.invulnerability = 0.55
+        self.invulnerability = 0.5
         self.game.shake = max(self.game.shake, 8)
-        sound.play("hurt")
-
+        self.game.sound.play("hurt")
         if self.health <= 0:
             self.game.respawn_player()
 
-    def update(self, dt, keys):
-        difficulty = DIFFICULTIES[self.game.difficulty]
+    def use_potion(self, kind):
+        if kind == "health":
+            if self.game.inventory.get("health_potion", 0) <= 0:
+                return False
+            self.game.inventory["health_potion"] -= 1
+            self.health = min(self.max_health, self.health + 35)
+            self.game.floating.append(FloatingText("+35 HP", self.rect.centerx, self.rect.y, GREEN))
+            self.game.sound.play("heal")
+            return True
 
+        if kind == "mana":
+            if self.game.inventory.get("mana_potion", 0) <= 0:
+                return False
+            self.game.inventory["mana_potion"] -= 1
+            self.stamina = min(self.max_stamina, self.stamina + 30)
+            self.game.floating.append(FloatingText("+30 MP", self.rect.centerx, self.rect.y, TEAL))
+            self.game.sound.play("heal")
+            return True
+
+        return False
+
+    def update(self, dt, keys):
         self.invulnerability = max(0, self.invulnerability - dt)
         self.attack_cooldown = max(0, self.attack_cooldown - dt)
         self.attack_timer = max(0, self.attack_timer - dt)
         self.dash_cooldown = max(0, self.dash_cooldown - dt)
         self.dash_timer = max(0, self.dash_timer - dt)
+        self.ranged_cooldown = max(0, self.ranged_cooldown - dt)
+        self.slide_timer = max(0, self.slide_timer - dt)
         self.coyote_time = max(0, self.coyote_time - dt)
         self.jump_buffer = max(0, self.jump_buffer - dt)
+        self.special_cooldown = max(0, self.special_cooldown - dt)
+        self.stamina = clamp(self.stamina + dt * 17, 0, self.max_stamina)
 
         left = keys[pygame.K_a] or keys[pygame.K_LEFT]
         right = keys[pygame.K_d] or keys[pygame.K_RIGHT]
 
-        if self.dash_timer <= 0:
+        if self.dash_timer > 0:
+            self.vx = self.direction * self.dash_speed
+        else:
             if left:
-                self.vx = -difficulty["player_speed"]
+                self.vx = -self.speed
                 self.direction = -1
             elif right:
-                self.vx = difficulty["player_speed"]
+                self.vx = self.speed
                 self.direction = 1
             else:
-                self.vx = 0.0
+                self.vx *= 0.75 if self.on_ground else 0.92
+                if abs(self.vx) < 2:
+                    self.vx = 0.0
+
+        if self.slide_timer > 0:
+            self.vx = self.direction * 430
+            self.rect.height = 58
+        else:
+            self.rect.height = self.height
 
         if self.jump_buffer > 0:
             self.jump_action()
             self.jump_buffer = 0.0
 
         if keys[pygame.K_f] or keys[pygame.K_j]:
-            self.attack()
+            self.melee_attack()
+        if keys[pygame.K_k]:
+            self.ranged_attack()
+        if keys[pygame.K_q]:
+            self.special_attack()
+        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+            self.dash()
+        if keys[pygame.K_LCTRL] or keys[pygame.K_c]:
+            self.slide()
+
+        if keys[pygame.K_1]:
+            self.use_potion("health")
+        if keys[pygame.K_2]:
+            self.use_potion("mana")
 
         self.vy += 1900 * dt
 
         old_bottom = self.rect.bottom
+        old_left = self.rect.left
+        old_right = self.rect.right
+
         self.x += self.vx * dt
         self.y += self.vy * dt
         self.rect.topleft = (int(self.x), int(self.y))
         self.on_ground = False
 
         for platform in self.game.platforms:
-            if self.rect.colliderect(platform) and self.vy >= 0 and old_bottom <= platform.top + 8:
-                self.rect.bottom = platform.top
-                self.y = float(self.rect.y)
-                self.vy = 0
-                self.on_ground = True
-                self.double_jump = True
-
-        if not self.on_ground and old_bottom <= self.game.level_height:
-            self.coyote_time = 0.1
+            if self.rect.colliderect(platform):
+                if self.vy >= 0 and old_bottom <= platform.top + 8:
+                    self.rect.bottom = platform.top
+                    self.y = float(self.rect.y)
+                    self.vy = 0
+                    self.on_ground = True
+                    self.double_jump = True
+                    self.jump_count = 0
+                elif self.vy > 0 and self.rect.bottom > platform.top and self.rect.top < platform.bottom:
+                    if old_right <= platform.left + 8 and self.rect.right > platform.left:
+                        self.rect.right = platform.left
+                        self.x = float(self.rect.x)
+                        self.vx = 0
+                    elif old_left >= platform.right - 8 and self.rect.left < platform.right:
+                        self.rect.left = platform.right
+                        self.x = float(self.rect.x)
+                        self.vx = 0
 
         self.rect.left = max(0, self.rect.left)
         self.x = float(self.rect.x)
@@ -540,12 +633,19 @@ class Player:
             if self.rect.colliderect(hazard):
                 self.take_damage(35 * dt)
 
+        for hazard in self.game.moving_hazards:
+            if self.rect.colliderect(hazard.rect):
+                self.take_damage(28 * dt)
+
         if self.rect.top > self.game.level_height + 260:
             self.game.respawn_player()
 
         if self.attack_timer > 0:
             frames = self.frames_attack
             anim_speed = 12
+        elif self.slide_timer > 0:
+            frames = self.frames_slide
+            anim_speed = 9
         elif not self.on_ground:
             frames = self.frames_jump
             anim_speed = 5
@@ -565,6 +665,8 @@ class Player:
 
         if self.attack_timer > 0:
             frames = self.frames_attack
+        elif self.slide_timer > 0:
+            frames = self.frames_slide
         elif not self.on_ground:
             frames = self.frames_jump
         elif self.vx != 0:
@@ -578,9 +680,13 @@ class Player:
 
         screen.blit(image, (self.rect.x - camera_x, self.rect.y))
 
+        bar = pygame.Rect(self.rect.x - camera_x, self.rect.y - 14, self.width, 6)
+        pygame.draw.rect(screen, BLACK, bar)
+        pygame.draw.rect(screen, TEAL, (bar.x, bar.y, int(bar.width * self.stamina / self.max_stamina), bar.height))
+
 
 # ============================================================
-# ВРАГ
+# ВРАГИ
 # ============================================================
 
 class Enemy:
@@ -594,20 +700,25 @@ class Enemy:
         self.y = float(y)
 
         if enemy_type == "zombie":
-            self.max_health = self.health = 60 * DIFFICULTIES[game.difficulty]["enemy_scale"]
-            self.damage = DIFFICULTIES[game.difficulty]["enemy_damage"]
-            self.speed = DIFFICULTIES[game.difficulty]["enemy_speed"]
-            self.frames = load_sheet("zombie_sheet.png", (58, 78), GREEN, "ZOMBIE", 4)
+            self.max_health = self.health = 70
+            self.damage = 10
+            self.speed = 70
+            self.frames = [fallback_surface((58, 78), GREEN, "Z") for _ in range(4)]
         elif enemy_type == "vampire":
-            self.max_health = self.health = 48 * DIFFICULTIES[game.difficulty]["enemy_scale"]
-            self.damage = DIFFICULTIES[game.difficulty]["enemy_damage"] * 1.35
-            self.speed = DIFFICULTIES[game.difficulty]["enemy_speed"] * 1.15
-            self.frames = load_sheet("vampire_sheet.png", (58, 78), PURPLE, "VAMPIRE", 4)
+            self.max_health = self.health = 55
+            self.damage = 13
+            self.speed = 85
+            self.frames = [fallback_surface((58, 78), PURPLE, "V") for _ in range(4)]
+        elif enemy_type == "brute":
+            self.max_health = self.health = 110
+            self.damage = 16
+            self.speed = 62
+            self.frames = [fallback_surface((58, 78), ORANGE, "B") for _ in range(4)]
         else:
-            self.max_health = self.health = 110 * DIFFICULTIES[game.difficulty]["enemy_scale"]
-            self.damage = DIFFICULTIES[game.difficulty]["enemy_damage"] * 1.6
-            self.speed = DIFFICULTIES[game.difficulty]["enemy_speed"] * 0.8
-            self.frames = load_sheet("brute_sheet.png", (58, 78), ORANGE, "BRUTE", 4)
+            self.max_health = self.health = 85
+            self.damage = 15
+            self.speed = 90
+            self.frames = [fallback_surface((58, 78), PINK, "P") for _ in range(4)]
 
         self.alive = True
         self.direction = -1
@@ -617,22 +728,19 @@ class Enemy:
     def take_damage(self, amount):
         if not self.alive:
             return
-
         self.health -= amount
         self.game.burst(self.rect.centerx, self.rect.centery, RED, 7)
-
         if self.health <= 0:
             self.alive = False
             self.game.score += 150
-            self.game.floating.append(
-                FloatingText("+150", self.rect.centerx, self.rect.y, GOLD)
-            )
+            self.game.floating.append(FloatingText("+150", self.rect.centerx, self.rect.y, GOLD))
             self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 22)
+            if random.random() < 0.28:
+                self.game.pickups.append(Pickup(self.rect.centerx, self.rect.centery, "heal"))
 
     def update(self, dt):
         if not self.alive:
             return
-
         distance = self.game.player.rect.centerx - self.rect.centerx
         if abs(distance) < 520:
             if distance > 8:
@@ -643,7 +751,6 @@ class Enemy:
                 self.x -= self.speed * dt
 
         self.rect.x = int(self.x)
-
         old_bottom = self.rect.bottom
         self.y += 1900 * dt
         self.rect.y = int(self.y)
@@ -659,11 +766,9 @@ class Enemy:
     def draw(self, camera_x):
         if not self.alive:
             return
-
         image = self.frames[self.frame]
         if self.direction < 0:
             image = pygame.transform.flip(image, True, False)
-
         screen.blit(image, (self.rect.x - camera_x, self.rect.y))
 
         bar = pygame.Rect(self.rect.x - camera_x, self.rect.y - 12, self.width, 7)
@@ -671,12 +776,7 @@ class Enemy:
         pygame.draw.rect(
             screen,
             RED,
-            (
-                bar.x,
-                bar.y,
-                int(bar.width * max(self.health, 0) / self.max_health),
-                bar.height,
-            ),
+            (bar.x, bar.y, int(bar.width * max(self.health, 0) / self.max_health), bar.height),
         )
 
 
@@ -684,7 +784,7 @@ class Enemy:
 # БОСС
 # ============================================================
 
-class Boss(Enemy):
+class Boss:
     def __init__(self, game, x, y):
         self.game = game
         self.width = 120
@@ -692,9 +792,10 @@ class Boss(Enemy):
         self.rect = pygame.Rect(x, y, self.width, self.height)
         self.x = float(x)
         self.y = float(y)
-        self.max_health = self.health = 880 * DIFFICULTIES[game.difficulty]["enemy_scale"]
-        self.damage = DIFFICULTIES[game.difficulty]["enemy_damage"] * 2.2
-        self.speed = 68
+        self.max_health = 980
+        self.health = self.max_health
+        self.damage = 20
+        self.speed = 78
         self.alive = True
         self.direction = -1
         self.phase = 1
@@ -702,59 +803,67 @@ class Boss(Enemy):
         self.cooldown = 1.2
         self.animation_time = 0
         self.frame = 0
-        self.frames = load_sheet("boss_sheet.png", (120, 140), RED, "BOSS", 4)
+        self.frames = [fallback_surface((120, 140), RED, "BOSS") for _ in range(4)]
 
     def take_damage(self, amount):
         if not self.alive:
             return
-
         self.health -= amount
         self.game.burst(self.rect.centerx, self.rect.centery, RED, 12)
-        sound.play("hit")
+        self.game.sound.play("hit")
 
-        if self.health <= self.max_health * 0.5 and self.phase == 1:
+        if self.health <= self.max_health * 0.60 and self.phase == 1:
             self.phase = 2
             self.rage = True
-            sound.play("boss")
-            self.game.floating.append(
-                FloatingText("БЕЗДНА ПРОСЫПАЕТСЯ!", self.rect.centerx, self.rect.y - 25, RED)
-            )
+            self.game.floating.append(FloatingText("ФАЗА 2", self.rect.centerx, self.rect.y - 30, RED))
+            self.game.sound.play("boss")
+
+        if self.health <= self.max_health * 0.25 and self.phase == 2:
+            self.phase = 3
+            self.rage = True
+            self.game.floating.append(FloatingText("ФАЗА 3", self.rect.centerx, self.rect.y - 30, PURPLE))
+            self.game.sound.play("boss")
 
         if self.health <= 0:
             self.alive = False
-            self.game.score += 1000
-            self.game.floating.append(FloatingText("+1000", self.rect.centerx, self.rect.y, GOLD))
-            self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 30)
-            sound.play("victory")
+            self.game.score += 2000
+            self.game.floating.append(FloatingText("+2000", self.rect.centerx, self.rect.y, GOLD))
+            self.game.burst(self.rect.centerx, self.rect.centery, PURPLE, 32)
+            self.game.sound.play("victory")
+            self.game.completed = True
 
     def update(self, dt):
         if not self.alive:
             return
-
         player = self.game.player
         distance = player.rect.centerx - self.rect.centerx
         self.direction = 1 if distance > 0 else -1
-
         if abs(distance) < 900:
-            self.x += self.direction * self.speed * (1.45 if self.rage else 1.0) * dt
+            self.x += self.direction * self.speed * (1.6 if self.rage else 1.0) * dt
             self.rect.x = int(self.x)
 
         self.cooldown -= dt
         if self.cooldown <= 0 and abs(distance) < 850:
-            self.cooldown = 0.75 if self.rage else 1.3
+            self.cooldown = 0.8 if self.rage else 1.4
+            dx = player.rect.centerx - self.rect.centerx
+            dy = player.rect.centery - self.rect.centery
+            length = max(1.0, math.hypot(dx, dy))
+            vx = (dx / length) * (280 + self.phase * 50)
+            vy = (dy / length) * (280 + self.phase * 50)
             self.game.projectiles.append(
                 Projectile(
                     self.rect.centerx,
                     self.rect.centery,
-                    player.rect.centerx,
-                    player.rect.centery,
-                    RED,
-                    18,
+                    vx,
+                    vy,
+                    RED if self.rage else PURPLE,
+                    18 + self.phase * 2,
                     260,
+                    is_player=False,
                 )
             )
             self.game.burst(self.rect.centerx, self.rect.centery, RED, 9, gravity=0)
-            sound.play("boss")
+            self.game.sound.play("boss")
 
         self.animation_time += dt * (10 if self.rage else 5)
         self.frame = int(self.animation_time) % len(self.frames)
@@ -762,61 +871,56 @@ class Boss(Enemy):
     def draw(self, camera_x):
         if not self.alive:
             return
-
         image = self.frames[self.frame]
         if self.direction < 0:
             image = pygame.transform.flip(image, True, False)
-
         screen.blit(image, (self.rect.x - camera_x, self.rect.y))
 
-        # Полоса здоровья босса
         bar = pygame.Rect(240, 18, 620, 20)
         pygame.draw.rect(screen, BLACK, bar)
         health_width = int(bar.width * max(self.health, 0) / self.max_health)
-        pygame.draw.rect(
-            screen,
-            RED if self.rage else PURPLE,
-            (bar.x, bar.y, health_width, bar.height),
-        )
+        color = RED if self.phase <= 2 else PURPLE
+        pygame.draw.rect(screen, color, (bar.x, bar.y, health_width, bar.height))
         pygame.draw.rect(screen, WHITE, bar, 2)
-
         draw_text("ВЛАДЫКА БЕЗДНЫ", font_small, WHITE, WIDTH // 2, 50)
 
 
 # ============================================================
-# СНАРЯД
+# СНАРЯДЫ
 # ============================================================
 
 class Projectile:
-    def __init__(self, x, y, target_x, target_y, color, damage, speed):
-        self.x = x
-        self.y = y
+    def __init__(self, x, y, vx, vy, color, damage, speed, is_player=True):
+        self.x = float(x)
+        self.y = float(y)
+        self.vx = vx
+        self.vy = vy
         self.color = color
         self.damage = damage
         self.speed = speed
         self.life = 4.0
-
-        dx = target_x - x
-        dy = target_y - y
-        length = max(1.0, math.hypot(dx, dy))
-        self.vx = (dx / length) * speed
-        self.vy = (dy / length) * speed
+        self.is_player = is_player
 
     def update(self, dt, game):
         self.x += self.vx * dt
         self.y += self.vy * dt
         self.life -= dt
-
         rect = pygame.Rect(int(self.x - 10), int(self.y - 10), 20, 20)
-        if rect.colliderect(game.player.rect):
-            game.player.take_damage(self.damage)
-            return False
 
-        return (
-            self.life > 0
-            and -50 < self.x < game.level_width + 50
-            and -50 < self.y < HEIGHT + 100
-        )
+        if self.is_player:
+            for enemy in game.enemies:
+                if enemy.alive and rect.colliderect(enemy.rect):
+                    enemy.take_damage(self.damage)
+                    return False
+            if game.boss and game.boss.alive and rect.colliderect(game.boss.rect):
+                game.boss.take_damage(self.damage)
+                return False
+        else:
+            if rect.colliderect(game.player.rect):
+                game.player.take_damage(self.damage)
+                return False
+
+        return self.life > 0 and -50 < self.x < game.level_width + 50 and -50 < self.y < HEIGHT + 100
 
     def draw(self, camera_x):
         pygame.draw.circle(screen, self.color, (int(self.x - camera_x), int(self.y)), 10)
@@ -824,7 +928,7 @@ class Projectile:
 
 
 # ============================================================
-# НОВЫЙ ПЛАТФОРМЕР
+# ПЛАТФОРМЫ / ЛОВУШКИ / ПОДБОРЫ
 # ============================================================
 
 class MovingPlatform:
@@ -840,6 +944,54 @@ class MovingPlatform:
         self.rect.x = int(self.start_x + math.sin(self.time) * self.distance)
 
 
+class MovingHazard:
+    def __init__(self, x, y, width, height, distance, speed):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.start_x = float(x)
+        self.distance = distance
+        self.speed = speed
+        self.time = random.random() * 5.0
+
+    def update(self, dt):
+        self.time += dt * self.speed
+        self.rect.x = int(self.start_x + math.sin(self.time) * self.distance)
+
+
+class Pickup:
+    def __init__(self, x, y, kind="coin"):
+        self.rect = pygame.Rect(x - 12, y - 12, 24, 24)
+        self.kind = kind
+        self.angle = random.random() * math.tau
+
+    def update(self, dt, game):
+        self.angle += dt * 4
+        if self.rect.colliderect(game.player.rect):
+            if self.kind == "heal":
+                game.player.health = min(game.player.max_health, game.player.health + 35)
+                game.player.stamina = min(game.player.max_stamina, game.player.stamina + 25)
+                game.floating.append(FloatingText("+35 HP", self.rect.centerx, self.rect.y, GREEN))
+                game.sound.play("heal")
+            elif self.kind == "coin":
+                game.coins += 1
+                game.score += 150
+                game.floating.append(FloatingText("+150", self.rect.centerx, self.rect.y, GOLD))
+                game.sound.play("coin")
+            return False
+        return True
+
+    def draw(self, camera_x):
+        x = self.rect.centerx - camera_x
+        y = self.rect.centery
+        if self.kind == "heal":
+            size = 10
+            pygame.draw.circle(screen, GREEN, (x, y), size)
+            pygame.draw.circle(screen, WHITE, (x, y), size - 3)
+        else:
+            size = 11 + int(2 * math.sin(self.angle))
+            pygame.draw.circle(screen, GOLD, (x, y), size)
+            pygame.draw.circle(screen, (255, 245, 160), (x, y), max(5, size - 4))
+
+
 # ============================================================
 # ИГРА
 # ============================================================
@@ -847,22 +999,29 @@ class MovingPlatform:
 class Game:
     def __init__(self):
         self.state = "menu"
+        self.selected_character = "Knight"
         self.difficulty = "Средне"
+        self.best_score = load_best()
+        self.inventory = {"health_potion": 2, "mana_potion": 1, "smoke_bomb": 1}
+        self.upgrade_levels = {"speed": 0, "jump": 0, "health": 0, "melee": 0, "magic": 0}
+        self.shop_costs = {"speed": 240, "jump": 240, "health": 280, "melee": 300, "magic": 320}
+        self.sound = SoundManager()
 
         self.level_width = 4700
         self.level_height = 600
-
         self.camera_x = 0
         self.score = 0.0
         self.coins = 0
-        self.best_score = load_best()
-        self.checkpoint_position = (150, 350)
-
+        self.time_limit = 120
+        self.quest_index = 0
+        self.quest_text = QUESTS[0]
+        self.completed = False
         self.time = 0.0
         self.shake = 0.0
 
         self.platforms = []
         self.hazards = []
+        self.moving_hazards = []
         self.checkpoints = []
         self.coin_rects = []
         self.enemies = []
@@ -870,95 +1029,212 @@ class Game:
         self.particles = []
         self.floating = []
         self.moving_platforms = []
+        self.pickups = []
 
-        self.player = Player(self)
+        self.level_index = 0
+        self.levels = [self.build_level_1(), self.build_level_2()]
+        self.player = Player(self, self.selected_character)
         self.boss = None
 
         self.menu_buttons = [
-            Button((400, 270, 300, 58), "Начать игру"),
-            Button((400, 340, 300, 58), "Настройки"),
-            Button((400, 410, 300, 58), "Выход"),
+            Button((350, 220, 400, 58), "Старт"),
+            Button((350, 300, 400, 58), "Персонаж"),
+            Button((350, 380, 400, 58), "Инвентарь"),
+            Button((350, 460, 400, 58), "Выход"),
+        ]
+        self.char_buttons = [
+            Button((150, 230, 220, 58), "Knight"),
+            Button((440, 230, 220, 58), "Ranger"),
+            Button((730, 230, 220, 58), "Mage"),
+            Button((430, 470, 240, 58), "Назад"),
+        ]
+        self.inventory_buttons = [
+            Button((220, 210, 220, 52), "Леч. зелье"),
+            Button((220, 280, 220, 52), "Мана"),
+            Button((220, 350, 220, 52), "Дым"),
+            Button((700, 480, 200, 52), "Назад"),
+        ]
+        self.shop_buttons = [
+            Button((850, 180, 180, 52), "Скорость"),
+            Button((850, 245, 180, 52), "Прыжок"),
+            Button((850, 310, 180, 52), "Здоровье"),
+            Button((850, 375, 180, 52), "Удар"),
+            Button((850, 440, 180, 52), "Магия"),
+            Button((850, 505, 180, 52), "Назад"),
         ]
 
-        self.settings_buttons = [
-            Button((400, 270, 300, 58), "Сложность"),
-            Button((400, 340, 300, 58), "Назад"),
-        ]
+    def build_level_1(self):
+        return {
+            "name": "Ground Zero",
+            "timer": 120,
+            "goal_x": 4400,
+            "mission": "Соберите 5 артефактов и победите босса",
+            "platforms": [
+                pygame.Rect(0, 540, 700, 110),
+                pygame.Rect(850, 540, 550, 110),
+                pygame.Rect(1550, 540, 650, 110),
+                pygame.Rect(2350, 540, 550, 110),
+                pygame.Rect(3050, 540, 550, 110),
+                pygame.Rect(3750, 540, 950, 110),
+                pygame.Rect(430, 430, 190, 28),
+                pygame.Rect(970, 390, 190, 28),
+                pygame.Rect(1250, 300, 180, 28),
+                pygame.Rect(1720, 410, 220, 28),
+                pygame.Rect(2050, 320, 190, 28),
+                pygame.Rect(2500, 420, 220, 28),
+                pygame.Rect(2800, 300, 180, 28),
+                pygame.Rect(3200, 410, 220, 28),
+                pygame.Rect(3500, 300, 180, 28),
+                pygame.Rect(3950, 390, 220, 28),
+                pygame.Rect(4300, 320, 250, 28),
+            ],
+            "moving_platforms": [
+                MovingPlatform(710, 470, 130, 25, 75, 1.5),
+                MovingPlatform(2200, 440, 130, 25, 120, 1.2),
+                MovingPlatform(2910, 450, 120, 25, 90, 1.8),
+            ],
+            "hazards": [
+                pygame.Rect(700, 615, 150, 35),
+                pygame.Rect(1400, 615, 150, 35),
+                pygame.Rect(2200, 615, 150, 35),
+                pygame.Rect(2900, 615, 150, 35),
+                pygame.Rect(3600, 615, 150, 35),
+            ],
+            "moving_hazards": [
+                MovingHazard(1730, 560, 120, 22, 80, 1.7),
+                MovingHazard(3350, 560, 120, 22, 100, 1.9),
+            ],
+            "checkpoints": [
+                pygame.Rect(1350, 490, 35, 50),
+                pygame.Rect(2700, 490, 35, 50),
+                pygame.Rect(3600, 490, 35, 50),
+            ],
+            "coins": [
+                pygame.Rect(470, 380, 28, 28),
+                pygame.Rect(570, 380, 28, 28),
+                pygame.Rect(1010, 340, 28, 28),
+                pygame.Rect(1290, 250, 28, 28),
+                pygame.Rect(1760, 360, 28, 28),
+                pygame.Rect(2100, 270, 28, 28),
+                pygame.Rect(2540, 370, 28, 28),
+                pygame.Rect(2840, 250, 28, 28),
+                pygame.Rect(3240, 360, 28, 28),
+                pygame.Rect(3540, 250, 28, 28),
+                pygame.Rect(3990, 340, 28, 28),
+                pygame.Rect(4370, 260, 28, 28),
+            ],
+            "enemies": [
+                Enemy(self, 570, 462, "zombie"),
+                Enemy(self, 1080, 312, "vampire"),
+                Enemy(self, 1250, 222, "zombie"),
+                Enemy(self, 1800, 332, "vampire"),
+                Enemy(self, 2150, 242, "brute"),
+                Enemy(self, 2600, 342, "vampire"),
+                Enemy(self, 3280, 332, "zombie"),
+                Enemy(self, 3550, 222, "brute"),
+                Enemy(self, 3980, 312, "zombie"),
+            ],
+            "boss": Boss(self, 4300, 180),
+        }
 
-        self.create_level()
+    def build_level_2(self):
+        return {
+            "name": "Deep Rift",
+            "timer": 150,
+            "goal_x": 4500,
+            "mission": "Пройдите роковой разлом и убейте финального босса",
+            "platforms": [
+                pygame.Rect(0, 540, 760, 110),
+                pygame.Rect(900, 520, 200, 28),
+                pygame.Rect(1200, 450, 220, 28),
+                pygame.Rect(1650, 410, 220, 28),
+                pygame.Rect(2050, 340, 180, 28),
+                pygame.Rect(2420, 300, 160, 28),
+                pygame.Rect(2820, 430, 230, 28),
+                pygame.Rect(3200, 520, 200, 28),
+                pygame.Rect(3550, 430, 220, 28),
+                pygame.Rect(3960, 360, 180, 28),
+                pygame.Rect(4300, 540, 300, 110),
+                pygame.Rect(1110, 540, 250, 110),
+                pygame.Rect(1880, 540, 200, 110),
+                pygame.Rect(2600, 540, 280, 110),
+                pygame.Rect(3330, 540, 220, 110),
+                pygame.Rect(3700, 540, 220, 110),
+            ],
+            "moving_platforms": [
+                MovingPlatform(1480, 430, 130, 22, 110, 1.8),
+                MovingPlatform(2250, 430, 130, 22, 90, 1.6),
+                MovingPlatform(3450, 320, 140, 22, 80, 1.9),
+            ],
+            "hazards": [
+                pygame.Rect(760, 615, 140, 35),
+                pygame.Rect(1440, 615, 130, 35),
+                pygame.Rect(2100, 615, 150, 35),
+                pygame.Rect(3000, 615, 180, 35),
+                pygame.Rect(3880, 615, 140, 35),
+            ],
+            "moving_hazards": [
+                MovingHazard(1220, 470, 120, 20, 90, 2.0),
+                MovingHazard(3440, 500, 140, 20, 100, 2.4),
+            ],
+            "checkpoints": [
+                pygame.Rect(1380, 390, 35, 50),
+                pygame.Rect(2750, 370, 35, 50),
+                pygame.Rect(3920, 300, 35, 50),
+            ],
+            "coins": [
+                pygame.Rect(925, 470, 28, 28),
+                pygame.Rect(1235, 400, 28, 28),
+                pygame.Rect(1700, 360, 28, 28),
+                pygame.Rect(2080, 290, 28, 28),
+                pygame.Rect(2460, 250, 28, 28),
+                pygame.Rect(2850, 380, 28, 28),
+                pygame.Rect(3260, 470, 28, 28),
+                pygame.Rect(3590, 380, 28, 28),
+                pygame.Rect(4020, 310, 28, 28),
+            ],
+            "enemies": [
+                Enemy(self, 980, 442, "zombie"),
+                Enemy(self, 1510, 360, "vampire"),
+                Enemy(self, 2080, 280, "brute"),
+                Enemy(self, 2890, 380, "vampire"),
+                Enemy(self, 3340, 470, "zombie"),
+                Enemy(self, 4010, 300, "brute"),
+            ],
+            "boss": Boss(self, 4380, 170),
+        }
 
-    def create_level(self):
-        self.platforms = [
-            pygame.Rect(0, 540, 700, 110),
-            pygame.Rect(850, 540, 550, 110),
-            pygame.Rect(1550, 540, 650, 110),
-            pygame.Rect(2350, 540, 550, 110),
-            pygame.Rect(3050, 540, 550, 110),
-            pygame.Rect(3750, 540, 950, 110),
-
-            pygame.Rect(430, 430, 190, 28),
-            pygame.Rect(970, 390, 190, 28),
-            pygame.Rect(1250, 300, 180, 28),
-            pygame.Rect(1720, 410, 220, 28),
-            pygame.Rect(2050, 320, 190, 28),
-            pygame.Rect(2500, 420, 220, 28),
-            pygame.Rect(2800, 300, 180, 28),
-            pygame.Rect(3200, 410, 220, 28),
-            pygame.Rect(3500, 300, 180, 28),
-            pygame.Rect(3950, 390, 220, 28),
-            pygame.Rect(4300, 320, 250, 28),
-        ]
-
-        self.moving_platforms = [
-            MovingPlatform(710, 470, 130, 25, 75, 1.5),
-            MovingPlatform(2200, 440, 130, 25, 120, 1.2),
-            MovingPlatform(2910, 450, 120, 25, 90, 1.8),
-        ]
-        self.platforms.extend([p.rect for p in self.moving_platforms])
-
-        self.hazards = [
-            pygame.Rect(700, 615, 150, 35),
-            pygame.Rect(1400, 615, 150, 35),
-            pygame.Rect(2200, 615, 150, 35),
-            pygame.Rect(2900, 615, 150, 35),
-            pygame.Rect(3600, 615, 150, 35),
-        ]
-
-        self.checkpoints = [
-            pygame.Rect(1350, 490, 35, 50),
-            pygame.Rect(2700, 490, 35, 50),
-            pygame.Rect(3600, 490, 35, 50),
-        ]
-
-        self.coin_rects = [
-            pygame.Rect(470, 380, 28, 28),
-            pygame.Rect(570, 380, 28, 28),
-            pygame.Rect(1010, 340, 28, 28),
-            pygame.Rect(1290, 250, 28, 28),
-            pygame.Rect(1760, 360, 28, 28),
-            pygame.Rect(2100, 270, 28, 28),
-            pygame.Rect(2540, 370, 28, 28),
-            pygame.Rect(2840, 250, 28, 28),
-            pygame.Rect(3240, 360, 28, 28),
-            pygame.Rect(3540, 250, 28, 28),
-            pygame.Rect(3990, 340, 28, 28),
-            pygame.Rect(4370, 260, 28, 28),
-        ]
-
-        self.enemies = [
-            Enemy(self, 570, 462, "zombie"),
-            Enemy(self, 1080, 312, "vampire"),
-            Enemy(self, 1250, 222, "zombie"),
-            Enemy(self, 1800, 332, "vampire"),
-            Enemy(self, 2150, 242, "brute"),
-            Enemy(self, 2600, 342, "vampire"),
-            Enemy(self, 3280, 332, "zombie"),
-            Enemy(self, 3550, 222, "brute"),
-            Enemy(self, 3980, 312, "zombie"),
-        ]
-
+    def load_level(self, level_index=None):
+        if level_index is None:
+            level_index = self.level_index
+        level = self.levels[level_index]
+        self.level_width = 4700
+        self.level_height = 600
+        self.time_limit = level["timer"]
+        self.quest_text = level["mission"]
+        self.platforms = list(level["platforms"]) + [p.rect for p in level["moving_platforms"]]
+        self.moving_platforms = level["moving_platforms"]
+        self.hazards = level["hazards"]
+        self.moving_hazards = level["moving_hazards"]
+        self.checkpoints = level["checkpoints"]
+        self.coin_rects = level["coins"]
+        self.enemies = level["enemies"]
         self.projectiles = []
-        self.boss = Boss(self, 4300, 180)
+        self.pickups = []
+        self.boss = level["boss"]
+        self.player.reset((150, 350))
+        self.player.max_health = CHARACTER_PRESETS[self.selected_character]["health"] + self.upgrade_levels.get("health", 0) * 20
+        self.player.health = self.player.max_health
+        self.coins = 0
+        self.score = 0
+        self.camera_x = 0
+        self.floating = []
+        self.particles = []
+        self.state = "playing"
+
+    def respawn_player(self):
+        self.player.reset((150, 350))
+        self.burst(self.player.rect.centerx, self.player.rect.centery, RED, 15)
 
     def burst(self, x, y, color, count=8, gravity=500):
         for _ in range(count):
@@ -967,35 +1243,39 @@ class Game:
                     x,
                     y,
                     color,
-                    life=random.uniform(0.25, 0.65),
+                    life=random.uniform(0.25, 0.7),
                     speed=random.uniform(60, 180),
                     gravity=gravity,
                 )
             )
 
-    def start_game(self):
-        self.state = "playing"
-        self.score = 0.0
-        self.coins = 0
-        self.camera_x = 0
-        self.checkpoint_position = (150, 350)
-
-        self.player.max_health = DIFFICULTIES[self.difficulty]["player_health"]
-        self.player.reset(self.checkpoint_position)
-        self.projectiles = []
-        self.create_level()
-        sound.start_music()
-
-    def respawn_player(self):
-        self.player.reset(self.checkpoint_position)
-        self.burst(self.checkpoint_position[0], self.checkpoint_position[1], RED, 15)
+    def buy_upgrade(self, upgrade_name):
+        if upgrade_name not in self.shop_costs:
+            return
+        cost = self.shop_costs[upgrade_name]
+        if self.coins < cost:
+            return
+        self.coins -= cost
+        self.upgrade_levels[upgrade_name] = self.upgrade_levels.get(upgrade_name, 0) + 1
+        if upgrade_name == "speed":
+            self.player.speed += 10
+        elif upgrade_name == "jump":
+            self.player.jump_power += 25
+        elif upgrade_name == "health":
+            self.player.max_health += 20
+            self.player.health += 20
+        elif upgrade_name == "melee":
+            self.player.attack_damage += 8
+        elif upgrade_name == "magic":
+            self.player.attack_damage += 10
 
     def update_checkpoint(self):
         for checkpoint in self.checkpoints:
-            if self.player.rect.colliderect(checkpoint) and checkpoint.x > self.checkpoint_position[0]:
-                self.checkpoint_position = (checkpoint.x, checkpoint.y - self.player.height)
+            if self.player.rect.colliderect(checkpoint) and checkpoint.x > self.player.x - 40:
+                self.player.x = float(checkpoint.x) + 40
+                self.player.rect.x = int(self.player.x)
                 self.score += 200
-                self.floating.append(FloatingText("ЧЕКПОИНТ +200", checkpoint.x, checkpoint.y - 25, GOLD))
+                self.floating.append(FloatingText("ЧЕКПОИНТ +200", checkpoint.x + 15, checkpoint.y - 25, GOLD))
                 self.burst(checkpoint.centerx, checkpoint.centery, GOLD, 18)
 
     def collect_coins(self):
@@ -1004,7 +1284,7 @@ class Game:
             if self.player.rect.colliderect(coin):
                 self.coins += 1
                 self.score += 100
-                sound.play("coin")
+                self.sound.play("coin")
                 self.floating.append(FloatingText("+100", coin.centerx, coin.y, GOLD))
                 self.burst(coin.centerx, coin.centery, GOLD, 12, gravity=0)
             else:
@@ -1014,15 +1294,27 @@ class Game:
     def update(self, dt):
         self.time += dt
         self.shake = max(0, self.shake - 20 * dt)
-
         self.particles = [p for p in self.particles if p.update(dt)]
         self.floating = [f for f in self.floating if f.update(dt)]
+        self.projectiles = [p for p in self.projectiles if p.update(dt, self)]
 
         if self.state != "playing":
             return
 
+        self.time_limit -= dt
+        if self.time_limit <= 0:
+            self.state = "menu"
+            self.best_score = max(self.best_score, int(self.score))
+            save_best(self.best_score)
+            self.floating.append(FloatingText("Время вышло", WIDTH // 2, HEIGHT // 2, RED))
+            return
+
         for platform in self.moving_platforms:
             platform.update(dt)
+        self.platforms = list(self.levels[self.level_index]["platforms"]) + [p.rect for p in self.moving_platforms]
+
+        for hazard in self.moving_hazards:
+            hazard.update(dt)
 
         keys = pygame.key.get_pressed()
         self.player.update(dt, keys)
@@ -1033,30 +1325,26 @@ class Game:
         if self.boss and self.boss.alive:
             self.boss.update(dt)
 
-        self.projectiles = [p for p in self.projectiles if p.update(dt, self)]
-
         self.update_checkpoint()
         self.collect_coins()
+        self.pickups = [p for p in self.pickups if p.update(dt, self)]
 
         self.score += dt * 10
+        self.camera_x = clamp(self.player.rect.centerx - WIDTH // 2, 0, self.level_width - WIDTH)
 
-        self.camera_x = clamp(
-            self.player.rect.centerx - WIDTH // 2,
-            0,
-            self.level_width - WIDTH,
-        )
-
-        end_condition = self.player.rect.x > 4450 and (not self.boss or not self.boss.alive)
-        if end_condition:
-            self.state = "victory"
-            self.best_score = max(self.best_score, int(self.score))
-            save_best(self.best_score)
-            sound.play("victory")
+        if self.player.rect.x > self.levels[self.level_index]["goal_x"] and (not self.boss or not self.boss.alive):
+            self.level_index += 1
+            if self.level_index >= len(self.levels):
+                self.state = "victory"
+                self.best_score = max(self.best_score, int(self.score))
+                save_best(self.best_score)
+            else:
+                self.load_level(self.level_index)
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                if self.state in ("playing", "paused", "settings", "victory"):
+                if self.state in ("playing", "paused", "char_select", "inventory", "shop", "victory"):
                     self.state = "menu"
 
             if self.state == "playing":
@@ -1066,37 +1354,63 @@ class Game:
                     self.player.jump_buffer = 0.15
                 elif event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
                     self.player.dash()
-
             elif self.state == "paused":
                 if event.key == pygame.K_p:
                     self.state = "playing"
 
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button != 1:
-                return
-
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             pos = event.pos
 
             if self.state == "menu":
                 if self.menu_buttons[0].rect.collidepoint(pos):
-                    self.start_game()
-                    sound.play("click")
+                    self.load_level(self.level_index)
+                    self.sound.play("click")
                 elif self.menu_buttons[1].rect.collidepoint(pos):
-                    self.state = "settings"
-                    sound.play("click")
+                    self.state = "char_select"
+                    self.sound.play("click")
                 elif self.menu_buttons[2].rect.collidepoint(pos):
+                    self.state = "inventory"
+                    self.sound.play("click")
+                elif self.menu_buttons[3].rect.collidepoint(pos):
                     pygame.quit()
                     sys.exit()
 
-            elif self.state == "settings":
-                if self.settings_buttons[0].rect.collidepoint(pos):
-                    names = list(DIFFICULTIES.keys())
-                    idx = names.index(self.difficulty)
-                    self.difficulty = names[(idx + 1) % len(names)]
-                    sound.play("click")
-                elif self.settings_buttons[1].rect.collidepoint(pos):
+            elif self.state == "char_select":
+                for i, btn in enumerate(self.char_buttons[:-1]):
+                    if btn.rect.collidepoint(pos):
+                        names = ["Knight", "Ranger", "Mage"]
+                        self.selected_character = names[i]
+                        self.player = Player(self, self.selected_character)
+                        self.player.reset((150, 350))
+                        self.sound.play("click")
+                        return
+                if self.char_buttons[-1].rect.collidepoint(pos):
                     self.state = "menu"
-                    sound.play("click")
+                    self.sound.play("click")
+
+            elif self.state == "inventory":
+                if self.inventory_buttons[0].rect.collidepoint(pos):
+                    self.player.use_potion("health")
+                elif self.inventory_buttons[1].rect.collidepoint(pos):
+                    self.player.use_potion("mana")
+                elif self.inventory_buttons[2].rect.collidepoint(pos):
+                    if self.inventory.get("smoke_bomb", 0) > 0:
+                        self.inventory["smoke_bomb"] -= 1
+                        self.player.invulnerability = 0.9
+                        self.floating.append(FloatingText("Туман", self.player.rect.centerx, self.player.rect.y, WHITE))
+                elif self.inventory_buttons[-1].rect.collidepoint(pos):
+                    self.state = "shop"
+                    self.sound.play("click")
+
+            elif self.state == "shop":
+                for key, button in zip(self.shop_costs.keys(), self.shop_buttons[:-1]):
+                    if button.rect.collidepoint(pos):
+                        self.buy_upgrade(key)
+                        self.sound.play("click")
+                        break
+                if self.shop_buttons[-1].rect.collidepoint(pos):
+                    self.state = "menu"
+                    self.sound.play("click")
 
             elif self.state == "victory":
                 self.state = "menu"
@@ -1115,17 +1429,14 @@ class Game:
         pygame.draw.circle(screen, (240, 230, 175), (moon_x, 100), 55)
 
         random.seed(8)
-        for _ in range(55):
+        for _ in range(60):
             x = (random.randint(0, WIDTH) - int(self.camera_x * 0.04)) % WIDTH
             y = random.randint(35, 280)
-            brightness = 140 + int(80 * (math.sin(self.time * 2 + x) + 1) / 2)
+            brightness = 140 + int(80 * (math.sin(self.time_limit * 2 + x) + 1) / 2)
             pygame.draw.circle(screen, (brightness, brightness, 210), (x, y), 1)
         random.seed()
 
-        for layer, color, base in [
-            (0.12, (35, 45, 78), 460),
-            (0.25, (28, 38, 66), 500),
-        ]:
+        for layer, color, base in [(0.12, (35, 45, 78), 460), (0.25, (28, 38, 66), 500)]:
             points = []
             for x in range(-100, WIDTH + 150, 100):
                 world_x = x + self.camera_x * layer
@@ -1148,25 +1459,23 @@ class Game:
             rect = hazard.copy()
             rect.x -= int(self.camera_x)
             for x in range(rect.left, rect.right, 18):
-                pygame.draw.polygon(
-                    screen,
-                    RED,
-                    [(x, rect.bottom), (x + 9, rect.top), (x + 18, rect.bottom)],
-                )
+                pygame.draw.polygon(screen, RED, [(x, rect.bottom), (x + 9, rect.top), (x + 18, rect.bottom)])
+
+        for hazard in self.moving_hazards:
+            rect = hazard.rect.copy()
+            rect.x -= int(self.camera_x)
+            for x in range(rect.left, rect.right, 18):
+                pygame.draw.polygon(screen, RED, [(x, rect.bottom), (x + 9, rect.top), (x + 18, rect.bottom)])
 
         for checkpoint in self.checkpoints:
             x = checkpoint.x - self.camera_x
             pygame.draw.line(screen, WHITE, (x + 15, checkpoint.y), (x + 15, checkpoint.y + 50), 4)
-            pygame.draw.polygon(
-                screen,
-                GOLD,
-                [(x + 17, checkpoint.y), (x + 55, checkpoint.y + 14), (x + 17, checkpoint.y + 28)],
-            )
+            pygame.draw.polygon(screen, GOLD, [(x + 17, checkpoint.y), (x + 55, checkpoint.y + 14), (x + 17, checkpoint.y + 28)])
 
         for coin in self.coin_rects:
             rect = coin.copy()
             rect.x -= int(self.camera_x)
-            pulse = int(2 * math.sin(self.time * 6 + coin.x))
+            pulse = int(2 * math.sin(self.time_limit * 6 + coin.x))
             pygame.draw.circle(screen, GOLD, rect.center, 14 + pulse)
             pygame.draw.circle(screen, (255, 245, 160), rect.center, 7)
 
@@ -1179,6 +1488,9 @@ class Game:
         for projectile in self.projectiles:
             projectile.draw(self.camera_x)
 
+        for pickup in self.pickups:
+            pickup.draw(self.camera_x)
+
         self.player.draw(self.camera_x)
 
         for particle in self.particles:
@@ -1187,68 +1499,79 @@ class Game:
         for floating in self.floating:
             floating.draw(self.camera_x)
 
-        finish_x = 4450 - self.camera_x
+        finish_x = self.levels[self.level_index]["goal_x"] - self.camera_x
         pygame.draw.line(screen, WHITE, (finish_x, 350), (finish_x, 540), 5)
         draw_text("ФИНИШ", font_small, GOLD, finish_x, 320)
 
+        darkness = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(darkness, (0, 0, 0, 150), (int(self.player.rect.centerx - self.camera_x), int(self.player.rect.centery)), 210)
+        screen.blit(darkness, (0, 0))
+
+        for i in range(5):
+            x = (self.camera_x * 0.15 + i * 180 + self.time_limit * 8) % (WIDTH + 120) - 60
+            y = 150 + (i % 3) * 70 + math.sin((self.time_limit + i) * 1.2) * 18
+            pygame.draw.circle(screen, (220, 220, 240, 60), (int(x), int(y)), 80)
+
         pygame.draw.rect(screen, (8, 10, 20, 180), (12, 12, 310, 108), border_radius=10)
         pygame.draw.rect(screen, BLACK, (25, 25, 180, 15))
-        pygame.draw.rect(
-            screen,
-            RED,
-            (25, 25, int(180 * max(self.player.health, 0) / self.player.max_health), 15),
-        )
+        pygame.draw.rect(screen, RED, (25, 25, int(180 * max(self.player.health, 0) / self.player.max_health), 15))
         pygame.draw.rect(screen, WHITE, (25, 25, 180, 15), 2)
 
         draw_text(f"Счёт: {int(self.score)}", font_small, WHITE, 25, 48, center=False)
-        draw_text(
-            f"Монеты: {self.coins}   Лучший: {self.best_score}",
-            font_small,
-            GOLD,
-            25,
-            77,
-            center=False,
-        )
-
-        draw_text(
-            "A/D — ходьба   SPACE — прыжок   F — удар",
-            font_tiny,
-            WHITE,
-            WIDTH - 440,
-            18,
-            center=False,
-        )
-        draw_text("SHIFT — рывок   P — пауза", font_tiny, WHITE, WIDTH - 245, 42, center=False)
+        draw_text(f"Монеты: {self.coins}   Лучший: {self.best_score}", font_small, GOLD, 25, 77, center=False)
+        draw_text(f"Уровень: {self.levels[self.level_index]['name']}", font_tiny, WHITE, 25, 98, center=False)
+        draw_text(f"Время: {int(self.time_limit)}", font_small, CYAN, WIDTH - 120, 35, center=True)
+        draw_text(self.quest_text[:38], font_tiny, WHITE, WIDTH // 2, 20, center=True)
 
     def draw_menu(self):
         self.draw_background()
-        draw_text("SHADOW PARKOUR", font_title, WHITE, WIDTH // 2, 135)
-        draw_text("NIGHTFALL — охота на Владыку Бездны", font_medium, BLUE, WIDTH // 2, 205)
+        draw_text("SHADOW PARKOUR", font_title, WHITE, WIDTH // 2, 110)
+        draw_text("NIGHTFALL — охота на Владыку Бездны", font_medium, BLUE, WIDTH // 2, 180)
+        draw_text(f"Выбранный герой: {self.selected_character}", font_medium, GOLD, WIDTH // 2, 260)
 
-        mouse_pos = pygame.mouse.get_pos()
+        mouse = pygame.mouse.get_pos()
         for button in self.menu_buttons:
-            button.update(mouse_pos)
+            button.update(mouse)
             button.draw()
 
-        draw_text(
-            f"Сложность: {self.difficulty}    Лучший счёт: {self.best_score}",
-            font_small,
-            GRAY,
-            WIDTH // 2,
-            525,
-        )
+        draw_text(f"Лучший счёт: {self.best_score}", font_small, GRAY, WIDTH // 2, 560)
 
-    def draw_settings(self):
+    def draw_char_select(self):
         self.draw_background()
-        draw_text("НАСТРОЙКИ", font_title, WHITE, WIDTH // 2, 145)
+        draw_text("ВЫБОР ПЕРСОНАЖА", font_title, WHITE, WIDTH // 2, 110)
+        names = ["Knight", "Ranger", "Mage"]
+        mouse = pygame.mouse.get_pos()
+        for i, button in enumerate(self.char_buttons[:-1]):
+            button.update(mouse)
+            button.draw()
+            draw_text(names[i], font_small, WHITE, button.rect.centerx, button.rect.centery)
+        self.char_buttons[-1].update(mouse)
+        self.char_buttons[-1].draw()
 
-        mouse_pos = pygame.mouse.get_pos()
-        for button in self.settings_buttons:
-            button.update(mouse_pos)
+    def draw_inventory(self):
+        self.draw_background()
+        draw_text("ИНВЕНТАРЬ", font_title, WHITE, WIDTH // 2, 120)
+        draw_text(f"Леч. зелье: {self.inventory.get('health_potion', 0)}", font_medium, GREEN, 420, 220)
+        draw_text(f"Мана: {self.inventory.get('mana_potion', 0)}", font_medium, TEAL, 420, 290)
+        draw_text(f"Дым: {self.inventory.get('smoke_bomb', 0)}", font_medium, WHITE, 420, 360)
+
+        mouse = pygame.mouse.get_pos()
+        for button in self.inventory_buttons:
+            button.update(mouse)
             button.draw()
 
-        draw_text(f"Текущая сложность: {self.difficulty}", font_medium, GOLD, WIDTH // 2, 455)
-        draw_text("Двойной прыжок, рывок и босс уже встроены", font_small, GRAY, WIDTH // 2, 505)
+        draw_text("1 — Леч. зелье   2 — Мана", font_small, WHITE, WIDTH // 2, 520)
+
+    def draw_shop(self):
+        self.draw_background()
+        draw_text("МАГАЗИН", font_title, WHITE, WIDTH // 2, 110)
+        mouse = pygame.mouse.get_pos()
+        for button in self.shop_buttons:
+            button.update(mouse)
+            button.draw()
+        draw_text(f"Монеты: {self.coins}", font_medium, GOLD, WIDTH // 2, 550)
+        for key, button in zip(self.shop_costs.keys(), self.shop_buttons[:-1]):
+            draw_text(f"{key}: {self.shop_costs[key]}", font_small, WHITE, button.rect.left - 20, button.rect.centery, center=False)
 
     def draw_pause(self):
         self.draw_level()
@@ -1261,22 +1584,43 @@ class Game:
     def draw_victory(self):
         self.draw_background()
         draw_text("ПОБЕДА!", font_title, GOLD, WIDTH // 2, 180)
-        draw_text("Владыка Бездны повержен", font_big, WHITE, WIDTH // 2, 275)
-        draw_text(f"Счёт: {int(self.score)}   Монет: {self.coins}", font_medium, GOLD, WIDTH // 2, 360)
+        draw_text("Все уровни пройдены", font_big, WHITE, WIDTH // 2, 275)
+        draw_text(f"Счёт: {int(self.score)}", font_medium, GOLD, WIDTH // 2, 360)
         draw_text(f"Рекорд: {self.best_score}", font_medium, WHITE, WIDTH // 2, 405)
-        draw_text("Мышь или ESC — вернуться в меню", font_small, GRAY, WIDTH // 2, 490)
+        draw_text("Нажмите ESC или мышь, чтобы вернуться в меню", font_small, GRAY, WIDTH // 2, 490)
 
     def draw(self):
         if self.state == "menu":
             self.draw_menu()
-        elif self.state == "settings":
-            self.draw_settings()
+        elif self.state == "char_select":
+            self.draw_char_select()
+        elif self.state == "inventory":
+            self.draw_inventory()
+        elif self.state == "shop":
+            self.draw_shop()
         elif self.state == "playing":
             self.draw_level()
         elif self.state == "paused":
             self.draw_pause()
         elif self.state == "victory":
             self.draw_victory()
+
+    def run(self):
+        running = True
+        while running:
+            dt = min(clock.tick(FPS) / 1000.0, 0.05)
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                self.handle_event(event)
+
+            self.update(dt)
+            self.draw()
+            pygame.display.flip()
+
+        pygame.quit()
+        sys.exit()
 
 
 # ============================================================
@@ -1285,22 +1629,7 @@ class Game:
 
 def main():
     game = Game()
-    running = True
-
-    while running:
-        dt = min(clock.tick(FPS) / 1000.0, 0.05)
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            game.handle_event(event)
-
-        game.update(dt)
-        game.draw()
-        pygame.display.flip()
-
-    pygame.quit()
-    sys.exit()
+    game.run()
 
 
 if __name__ == "__main__":
